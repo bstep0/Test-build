@@ -90,12 +90,12 @@ function mapSvg(depot, groups, { roundTrip = true } = {}) {
     const arrows = seq.slice(1).map((b, i) => {
       const a = seq[i], x1 = X(a), y1 = Y(a), x2 = X(b), y2 = Y(b);
       if (Math.hypot(x2 - x1, y2 - y1) < 26) return '';
-      return `<path d="M-4.5,-3.6 L4.5,0 L-4.5,3.6z" fill="${esc(g.color)}" transform="translate(${(x1 + x2) / 2},${(y1 + y2) / 2}) rotate(${(Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI})"/>`;
+      return `<path class="arrow" d="M-4.5,-3.6 L4.5,0 L-4.5,3.6z" fill="${esc(g.color)}" transform="translate(${(x1 + x2) / 2},${(y1 + y2) / 2}) rotate(${(Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI})"/>`;
     }).join('');
-    const dots = pts.map((s, i) => `<g><title>${esc(s.title || '')}</title><circle cx="${X(s)}" cy="${Y(s)}" r="11.5" fill="${esc(g.color)}" stroke="#fff" stroke-width="2.2"/><text x="${X(s)}" y="${Y(s)}">${esc(s.label ?? i + 1)}</text></g>`).join('');
-    return `<path d="${d}" fill="none" stroke="${esc(g.color)}" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" opacity=".8"/>${arrows}${dots}`;
+    const dots = pts.map((s, i) => `<g class="pin" style="--i:${i}"><title>${esc(s.title || '')}</title><circle cx="${X(s)}" cy="${Y(s)}" r="11.5" fill="${esc(g.color)}" stroke="#fff" stroke-width="2.2"/><text x="${X(s)}" y="${Y(s)}">${esc(s.label ?? i + 1)}</text></g>`).join('');
+    return `<path class="route-line" pathLength="1" d="${d}" fill="none" stroke="${esc(g.color)}" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" opacity=".8"/>${arrows}${dots}`;
   }).join('');
-  const home = depot ? `<g><title>Shop</title><rect x="${X(depot) - 12}" y="${Y(depot) - 12}" width="24" height="24" rx="7" fill="#0a2540" stroke="#fff" stroke-width="2.2"/><path d="M${X(depot) - 6} ${Y(depot) + 1}l6-5.5 6 5.5M${X(depot) - 4} ${Y(depot)}v5.5h8V${Y(depot)}" fill="none" stroke="#67e8f9" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></g>` : '';
+  const home = depot ? `<g><title>Shop</title><circle class="pulse" cx="${X(depot)}" cy="${Y(depot)}" r="14" fill="#22d3ee" opacity=".5"/><rect x="${X(depot) - 12}" y="${Y(depot) - 12}" width="24" height="24" rx="7" fill="#0a2540" stroke="#fff" stroke-width="2.2"/><path d="M${X(depot) - 6} ${Y(depot) + 1}l6-5.5 6 5.5M${X(depot) - 4} ${Y(depot)}v5.5h8V${Y(depot)}" fill="none" stroke="#67e8f9" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></g>` : '';
   return raw(`<svg class="map" viewBox="0 0 ${W} ${H}" role="img" aria-label="Route map"><defs><pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" style="stroke:var(--map-grid)" stroke-width="1"/></pattern></defs>
     <rect width="${W}" height="${H}" style="fill:var(--map-bg)"/><rect width="${W}" height="${H}" fill="url(#g)"/>${paths}${home}</svg>`);
 }
@@ -140,7 +140,7 @@ const GET = (u) => api('GET', u), POST = (u, b) => api('POST', u, b || {}), PUT 
 
 let toastTimer;
 function toast(msg, err) {
-  const t = $('#toast'); t.textContent = msg; t.className = 'show' + (err ? ' err' : '');
+  const t = $('#toast'); t.innerHTML = icon(err ? 'alert' : 'check').s + esc(msg); t.className = 'show' + (err ? ' err' : '');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.className = ''), 2600);
 }
 const guard = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, true); } };
@@ -193,7 +193,11 @@ const techOptions = (list, blank = 'Unassigned') => [['', blank], ...list.map((t
 const actions = {};
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
-  if (el) { e.preventDefault(); const f = actions[el.dataset.act]; if (f) guard(f)(el.dataset, el); return; }
+  if (el) {
+    e.preventDefault(); const f = actions[el.dataset.act];
+    if (f) { const btn = el.classList.contains('btn') ? el : null; btn?.classList.add('busy'); Promise.resolve(guard(f)(el.dataset, el)).finally(() => btn?.classList.remove('busy')); }
+    return;
+  }
   const row = e.target.closest('[data-href]');
   if (row && !e.target.closest('a,button')) location.hash = row.dataset.href;
 });
@@ -228,28 +232,36 @@ window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); }
 // ---------- Dashboard ----------
 views.dashboard = async () => {
   const d = await GET('/dashboard?date=' + localISO());
-  const pct = d.today.total ? Math.round((100 * d.today.done) / d.today.total) : 0;
-  const h = new Date().getHours();
-  const kpi = (cls, ic, n, l) => html`<div class="card kpi ${cls}"><div class="ico">${icon(ic)}</div><div><div class="n">${n}</div><div class="l">${l}</div></div></div>`;
-  return html`${pageHead(`${h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'} 👋`, fmtDate(d.date, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }),
-    html`<a class="btn" href="#/builder">${icon('columns')} Route builder</a><button class="btn primary" data-act="optToday">${icon('zap')} Optimize today</button>`)}
-  <div class="grid">
-    ${kpi('', 'check', `${d.today.done}/${d.today.total}`, `Stops done today · ${pct}%`)}
-    ${kpi('warn', 'wrench', d.open_work_orders, 'Open work orders')}
-    ${kpi(d.overdue ? 'bad' : '', 'dollar', money(d.outstanding), d.overdue ? `Outstanding · ${money(d.overdue)} overdue` : 'Outstanding invoices')}
-    ${kpi('ok', 'trend', money(d.paid_this_month), 'Collected this month')}
+  const pct = d.today.total ? Math.round((100 * d.today.done) / d.today.total) : 0, h = new Date().getHours();
+  const tr = d.trend, labels = tr.map((t) => fmtDate(t.week, { month: 'numeric', day: 'numeric' }));
+  const kpi = (cls, ic, n, l, spark = '') => html`<div class="card kpi lift ${cls}"><div class="ico">${icon(ic)}</div><div><div class="n">${n}</div><div class="l">${l}</div></div>${spark ? html`<div class="spark">${spark}</div>` : ''}</div>`;
+  return html`<section class="hero">
+    <h1>${h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'}, ${me.name.split(' ')[0]}</h1>
+    <div class="sub">${d.today.total ? `${d.today.total} stop${d.today.total === 1 ? '' : 's'} on the schedule today` : 'Nothing scheduled today'}${d.overdue ? ` · ${money(d.overdue)} overdue` : ' · no overdue invoices'}</div>
+    <div class="actions"><button class="btn primary" data-act="optToday">${icon('zap')} Optimize today</button><a class="btn" href="#/builder">${icon('columns')} Route builder</a><a class="btn" href="#/route">${icon('route')} Open today's route</a></div>
+    <div class="ringwrap"><svg class="ring" viewBox="0 0 36 36" aria-hidden="true"><circle class="bg" cx="18" cy="18" r="15.915" pathLength="100"/><circle class="fg" cx="18" cy="18" r="15.915" pathLength="100" style="--p:${pct}"/></svg>
+      <div><b style="font-size:22px">${countUp(pct, 'pct')}</b><span>${d.today.done} of ${d.today.total} stops done</span></div></div>
+    ${waves()}</section>
+  <div class="grid stagger">
+    ${kpi('', 'check', html`${countUp(d.today.done)}<span class="muted" style="font-size:16px"> / ${d.today.total}</span>`, 'Stops completed today', sparkline(tr.map((t) => t.visits)))}
+    ${kpi('warn', 'wrench', countUp(d.open_work_orders), 'Open work orders')}
+    ${kpi(d.overdue ? 'bad' : '', 'dollar', countUp(d.outstanding, 'money'), d.overdue ? `Outstanding · ${money(d.overdue)} overdue` : 'Outstanding invoices')}
+    ${kpi('ok', 'trend', countUp(d.paid_this_month, 'money'), 'Collected this month', sparkline(tr.map((t) => t.collected), 'var(--ok)'))}
   </div>
-  <div class="split mt" style="margin-top:20px">
-    <div><h2 style="margin-top:6px">Today's routes</h2>
-    ${d.today.byTech.length ? html`<div class="card flush">${d.today.byTech.map((t) => html`<a href="#/route" style="color:inherit;text-decoration:none;display:flex;gap:12px;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line)">
-      <span class="avatar" style="background:${t.color}">${t.name.split(' ').map((w) => w[0]).join('').slice(0, 2)}</span>
-      <div class="grow"><div class="row spread"><b>${t.name}</b><span class="muted small">${t.done || 0} of ${t.total} stops</span></div><div class="bar" style="margin-top:7px"><i style="width:${(100 * (t.done || 0)) / t.total}%;background:${t.color}"></i></div></div></a>`)}</div>`
-      : html`<div class="card empty">No stops scheduled today. <a href="#/builder">Build your routes</a> to get started.</div>`}</div>
-    <div><h2 style="margin-top:6px">Needs attention</h2>
-    ${d.attention.length ? html`<div class="card flush">${d.attention.slice(0, 8).map((a) => html`<div class="finding" style="padding:12px 18px;flex-wrap:wrap"><div><a href="#/customers/${a.customer_id}"><b>${a.customer_name}</b></a><br><span class="muted small">${a.pool_name} · tested ${fmtDate(a.date)}</span></div>
-      <span class="dose row" style="gap:6px;justify-content:flex-end">${a.issues.map((i) => html`<span class="badge ${i.status === 'low' ? 'warn' : 'bad'}">${i.label.replace('Total ', '').replace(' (CYA)', '')} ${i.status} · ${i.value}</span>`)}</span></div>`)}</div>`
-      : html`<div class="card empty">${icon('check')}<div class="mt">All recent water tests look good.</div></div>`}</div>
-  </div>`;
+  <div class="split" style="margin-top:20px">
+    <div class="card"><div class="row spread"><h3>Billing &amp; collections</h3><div class="legend" style="margin:0"><span><i class="dot" style="background:var(--brand)"></i>Billed</span><span><i class="dot" style="background:var(--ok)"></i>Collected</span></div></div>
+      <div class="muted small" style="margin:2px 0 8px">Last 8 weeks</div>
+      ${areaChart([{ name: 'Billed', color: '#0891b2', values: tr.map((t) => t.billed) }, { name: 'Collected', color: '#0f9d58', values: tr.map((t) => t.collected) }], labels, { money: true })}</div>
+    <div class="card flush"><div class="card-head"><h3>Today's routes</h3><a class="small" href="#/route">View all →</a></div>
+      ${d.today.byTech.length ? d.today.byTech.map((t) => html`<a href="#/route" style="color:inherit;text-decoration:none;display:flex;gap:14px;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line)">
+        ${avatar(t.name, 40)}<div class="grow"><div class="row spread"><b>${t.name}</b><span class="muted small">${t.done || 0} of ${t.total}</span></div><div class="bar" style="margin-top:8px"><i style="width:${(100 * (t.done || 0)) / t.total}%"></i></div></div></a>`)
+        : html`<div class="empty" style="padding:30px">No stops scheduled today. <a href="#/builder">Build your routes</a>.</div>`}</div>
+  </div>
+  <h2>Water needs attention</h2>
+  ${d.attention.length ? html`<div class="card flush stagger">${d.attention.slice(0, 8).map((a) => html`<a href="#/customers/${a.customer_id}" style="color:inherit;text-decoration:none;display:flex;gap:14px;align-items:center;padding:13px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap">
+      ${avatar(a.customer_name, 36)}<div class="grow"><b>${a.customer_name}</b><div class="muted small">${a.pool_name} · tested ${fmtDate(a.date)}</div></div>
+      <span class="row" style="gap:6px">${a.issues.map((i) => html`<span class="badge ${i.status === 'low' ? 'warn' : 'bad'}">${i.label.replace('Total ', '').replace(' (CYA)', '')} ${i.status} · ${i.value}</span>`)}</span></a>`)}</div>`
+    : emptyState('Crystal clear', html`<div>All recent water tests are in range.</div>`)}`;
 };
 actions.optToday = async () => optimizeFlow([{ label: 'Today', body: { date: localISO() } }], 'Optimize today’s routes');
 
@@ -274,7 +286,7 @@ views.route = async () => {
     <button class="btn icon" data-act="day" data-d="1" aria-label="Next day">›</button>
     <button class="btn" data-act="day" data-d="today">Today</button><span class="grow"></span>
     <select class="staff-only" style="width:auto" data-live="routeTech">${techOptions(ts, 'All technicians').map(([k, l]) => html`<option value="${k}" ${raw(String(k) === routeTech ? 'selected' : '')}>${l}</option>`)}</select></div>
-  ${stops.length ? html`<div class="split">
+  ${stops.length ? html`<div class="progress"><div class="bar grow"><i style="width:${(100 * done) / stops.length}%"></i></div><b class="small">${done}/${stops.length} done</b></div><div class="split">
     <div>${groups.map((g) => { const x = Geo.stats(depot, g.stops, statOpts(st)); return html`<div class="grouphead"><span class="dot" style="background:${g.color}"></span><h3>${g.name}</h3>
         <span class="chip">${g.stops.length} ${g.stops.length === 1 ? "stop" : "stops"}</span><span class="chip">${icon('route')} ${fmtMi(x.miles)}</span><span class="chip">${icon('clock')} ${fmtMin(x.totalMin)}</span></div>
       ${g.stops.map((s, i) => html`<div class="card stop ${s.status === 'done' ? 'done' : ''}" style="border-left-color:${g.color}">
@@ -483,47 +495,50 @@ const collectReadings = (root) => Object.fromEntries(READINGS.map(([k]) => [k, n
 
 views.visit = async (id) => {
   const [v, ts] = await Promise.all([GET('/visits/' + id), techs()]);
-  const locked = !!v.invoice_id;
-  const prev = v.previous;
-  const lowDose = (k) => (prev && prev[k] != null ? `last: ${prev[k]}` : '');
+  const locked = !!v.invoice_id, prev = v.previous;
+  const lastOf = (k) => (prev && prev[k] != null ? `last visit: ${prev[k]}` : '');
+  const stage = v.status === 'done' ? 3 : v.arrived_at ? 2 : 1;
+  const step = (n, label) => html`<div class="s ${stage >= n ? 'on' : ''}"><b>${stage > n || (n === 3 && stage === 3) ? '✓' : n}</b>${label}</div>`;
   return html`<p class="small"><a href="#/route">‹ Back to route</a></p>
-  <div class="row spread"><div><h1 style="margin:0">${v.customer_name}</h1>
-    <div class="muted">${v.pool_name} · ${v.volume_gal?.toLocaleString()} gal · ${fmtDate(v.date)}</div></div>
+  <section class="visit-head"><div class="row spread" style="align-items:flex-start"><div><h1>${v.customer_name}</h1>
+    <div class="meta">${v.pool_name} · ${v.volume_gal?.toLocaleString()} gal · ${fmtDate(v.date)}</div></div>
     <span class="badge ${v.status === 'done' ? 'ok' : v.status === 'skipped' ? 'warn' : ''}">${v.status}${locked ? ' · invoiced' : ''}</span></div>
-  <div class="card mt small">
-    <div>📍 <a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(v.address + ', ' + v.city)}">${v.address}, ${v.city}</a>
-      ${v.phone ? html` · <a href="tel:${v.phone}">${v.phone}</a>` : ''} ${v.gate_code ? html` · Gate <b>${v.gate_code}</b>` : ''}</div>
-    ${v.customer_notes ? html`<div class="mt">⚠️ ${v.customer_notes}</div>` : ''}${v.pool_notes ? html`<div>🔧 ${v.pool_notes}</div>` : ''}
-  </div>
+    <div class="steps">${step(1, 'Scheduled')}<div class="line"></div>${step(2, 'Arrived')}<div class="line"></div>${step(3, 'Completed')}</div></section>
+  <div class="card small">
+    <div class="row" style="gap:14px"><span>${icon('pin')} <a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(v.address + ', ' + v.city)}">${v.address}, ${v.city}</a></span>
+      ${v.phone ? html`<span>${icon('phone')} <a href="tel:${v.phone}">${v.phone}</a></span>` : ''} ${v.gate_code ? html`<span class="chip">Gate ${v.gate_code}</span>` : ''}
+      ${v.status === 'scheduled' && !v.arrived_at && !locked ? html`<button type="button" class="btn sm primary" style="margin-left:auto" data-act="arrive" data-id="${v.id}">I've arrived</button>` : ''}</div>
+    ${v.customer_notes ? html`<div class="mt">⚠️ ${v.customer_notes}</div>` : ''}${v.pool_notes ? html`<div>🔧 ${v.pool_notes}</div>` : ''}</div>
   <form id="vform" data-id="${v.id}" data-volume="${v.volume_gal}">
   <h2>Water chemistry</h2>
-  <div class="card" data-live="readings"><div class="reading">${READINGS.map(([k, l, step]) => html`<label>${l}<input name="${k}" type="number" inputmode="decimal" step="${step}" value="${v[k]}" ${raw(locked ? 'disabled' : '')}>
-    <div class="hint" id="hint-${k}">${lowDose(k)}</div></label>`)}</div></div>
+  <div class="card" data-live="readings"><div class="reading">${READINGS.map(([k, l, step_]) => html`<label>${l}<input name="${k}" type="number" inputmode="decimal" step="${step_}" value="${v[k]}" ${raw(locked ? 'disabled' : '')}>
+    ${GAUGE[k] ? gaugeHtml(k, v[k]) : ''}<div class="hint">${lastOf(k)}</div></label>`)}</div></div>
   <div class="card mt" id="findings">${findingsHtml(v.volume_gal, v)}</div>
   <h2>Tasks</h2>
-  <div class="card tasks">${TASKS.map((t) => html`<label class="check"><input type="checkbox" name="task" value="${t}" ${raw(v.tasks.includes(t) ? 'checked' : '')}> ${t}</label>`)}</div>
+  <div class="tasks">${TASKS.map((t) => html`<label class="task"><input type="checkbox" name="task" value="${t}" ${raw(v.tasks.includes(t) ? 'checked' : '')}> ${t}</label>`)}</div>
   <h2>Chemicals added</h2>
   <div class="card"><div id="chems">${(v.chemicals.length ? v.chemicals : []).map(chemRow)}</div>
-    <button type="button" class="btn sm" data-act="addChem">+ Add chemical</button> <span class="muted small">Charges are added to the invoice.</span></div>
-  <h2>Notes & billing</h2>
+    <button type="button" class="btn sm" data-act="addChem">${icon('plus')} Add chemical</button> <span class="muted small">Charges are added to the invoice.</span></div>
+  <h2>Notes &amp; billing</h2>
   <div class="card fields"><label class="full">Notes<textarea name="notes" rows="3" placeholder="Equipment issues, observations…">${v.notes}</textarea></label>
     <label class="staff-only">Technician<select name="tech_id">${techOptions(ts).map(([k, l]) => html`<option value="${k}" ${raw(String(k) === String(v.tech_id ?? '') ? 'selected' : '')}>${l}</option>`)}</select></label>
     <label class="staff-only">Visit price<input name="price" type="number" step="0.01" value="${v.price}" ${raw(locked ? 'disabled' : '')}></label></div>
-  <div class="row mt noprint">
-    ${v.status === 'done' ? html`<button type="button" class="btn big primary" data-act="saveVisit" data-status="done">Save changes</button><button type="button" class="btn" data-act="saveVisit" data-status="scheduled" ${raw(locked ? 'disabled' : '')}>Re-open</button>`
-      : html`<button type="button" class="btn big primary" data-act="saveVisit" data-status="done">✓ Complete visit</button><button type="button" class="btn" data-act="saveVisit" data-status="scheduled">Save draft</button><button type="button" class="btn" data-act="saveVisit" data-status="skipped">Skip stop</button>`}
-    <span class="grow"></span><button type="button" class="btn danger staff-only" data-act="delVisit" data-id="${v.id}" ${raw(locked ? 'disabled' : '')}>Delete</button>
-  </div></form>
+  <div class="actionbar noprint"><div class="row">
+    ${v.status === 'done' ? html`<button type="button" class="btn big primary" data-act="saveVisit" data-status="done">Save changes</button><button type="button" class="btn big" data-act="saveVisit" data-status="scheduled" ${raw(locked ? 'disabled' : '')}>Re-open</button>`
+      : html`<button type="button" class="btn big primary" data-act="saveVisit" data-status="done">${icon('check')} Complete visit</button><button type="button" class="btn big" data-act="saveVisit" data-status="scheduled">Save draft</button><button type="button" class="btn big" data-act="saveVisit" data-status="skipped">Skip</button>`}
+    <span class="grow"></span><button type="button" class="btn danger staff-only" data-act="delVisit" data-id="${v.id}" ${raw(locked ? 'disabled' : '')}>Delete</button></div></div></form>
   <div class="row small muted mt noprint">Need a repair? <a href="#" data-act="newWO" data-pool="${v.pool_id}">Create a work order for this pool</a></div>`;
 };
+actions.arrive = async ({ id }) => { await PUT('/visits/' + id, { arrived_at: new Date().toISOString() }); toast('Arrival recorded'); render(); };
 live.readings = (e) => {
   const form = e.target.closest('form');
   const r = collectReadings(form);
   $('#findings').innerHTML = findingsHtml(form.dataset.volume, r).s;
+  updateGauges(form);
 };
 actions.addChem = () => $('#chems').insertAdjacentHTML('beforeend', chemRow().s);
 actions.rmChem = (_, el) => el.closest('.chem').remove();
-actions.saveVisit = async ({ status }) => {
+actions.saveVisit = async ({ status }, btn) => {
   const f = $('#vform');
   const body = {
     status, ...collectReadings(f), notes: f.notes.value, tech_id: f.tech_id.value === '' ? null : Number(f.tech_id.value),
@@ -533,8 +548,9 @@ actions.saveVisit = async ({ status }) => {
   if (!f.price.disabled) body.price = num(f.price.value) ?? 0;
   if (f.ph.disabled) for (const k of [...READINGS.map((r) => r[0]), 'price', 'status']) delete body[k]; // invoiced: only notes/tech editable
   if (status === 'done' && !body.tasks.length && !confirm('No tasks checked. Complete the visit anyway?')) return;
-  await PUT('/visits/' + f.dataset.id, body);
-  toast(status === 'done' ? 'Visit completed' : status === 'skipped' ? 'Stop skipped' : 'Saved');
+  const res = await PUT('/visits/' + f.dataset.id, body);
+  toast(res.queued ? 'Saved offline — will sync when you’re back online' : status === 'done' ? 'Visit completed' : status === 'skipped' ? 'Stop skipped' : 'Saved');
+  if (status === 'done' && btn) { const r = btn.getBoundingClientRect(); confetti(r.left + r.width / 2, r.top); await new Promise((ok) => setTimeout(ok, 650)); }
   if (status !== 'scheduled') location.hash = '#/route'; else render();
 };
 actions.delVisit = async ({ id }) => { if (confirm('Delete this visit?')) { await DEL('/visits/' + id); location.hash = '#/route'; } };
@@ -553,10 +569,10 @@ const customerList = async () => {
   const list = await GET('/customers' + (showArchived ? '?archived=1' : ''));
   return html`<div class="row spread"><h1 style="margin:0">${showArchived ? 'Archived customers' : 'Customers'}</h1><div class="row"><button class="btn" data-act="toggleArchived">${showArchived ? 'Back to active' : 'Archived'}</button><button class="btn primary" data-act="newCustomer">+ Add customer</button></div></div>
   <div class="mt"><input type="search" placeholder="Search customers…" data-filter="#custtable tbody tr"></div>
-  ${list.length ? html`<div class="card mt" style="padding:0;overflow-x:auto"><table id="custtable"><thead><tr><th>Name</th><th class="hide-sm">Address</th><th>Pools</th><th class="right">Rate</th><th class="right">Balance</th></tr></thead><tbody>
-    ${list.map((c) => html`<tr class="click" data-href="#/customers/${c.id}"><td><b>${c.name}</b>${showArchived ? html` <button class="btn sm" data-act="restoreCustomer" data-id="${c.id}">Restore</button>` : ''}</td><td class="hide-sm muted">${c.address}${c.city ? ', ' + c.city : ''}</td><td>${c.pools}</td><td class="right">${money(c.rate)}</td>
+  ${list.length ? html`<div class="card mt" style="padding:0;overflow-x:auto"><table id="custtable"><thead><tr><th>Customer</th><th class="hide-sm">Contact</th><th>Pools</th><th class="right">Rate</th><th class="right">Balance</th></tr></thead><tbody>
+    ${list.map((c) => html`<tr class="click" data-href="#/customers/${c.id}"><td><div class="row" style="gap:12px;flex-wrap:nowrap">${avatar(c.name, 36)}<div><b>${c.name}</b><div class="muted small hide-sm">${c.address}${c.city ? ', ' + c.city : ''}</div></div></div>${showArchived ? html` <button class="btn sm" data-act="restoreCustomer" data-id="${c.id}">Restore</button>` : ''}</td><td class="hide-sm muted">${c.phone || c.email || '—'}</td><td>${c.pools}</td><td class="right">${money(c.rate)}</td>
       <td class="right">${c.balance ? html`<span class="badge warn">${money(c.balance)}</span>` : html`<span class="muted">—</span>`}</td></tr>`)}</tbody></table></div>`
-    : html`<div class="card empty mt">No customers yet. Add your first one to start building routes.</div>`}`;
+    : emptyState(showArchived ? 'Nothing archived' : 'No customers yet', 'Add your first customer to start building routes.', showArchived ? '' : html`<button class="btn primary" data-act="newCustomer">${icon('plus')} Add customer</button>`)}`;
 };
 actions.newCustomer = () => openForm({ title: 'New customer', fields: CUSTOMER_FIELDS, values: { rate: 120 }, onSave: async (d) => { const c = await POST('/customers', d); location.hash = '#/customers/' + c.id; } });
 actions.editCustomer = async ({ id }) => openForm({ title: 'Edit customer', fields: CUSTOMER_FIELDS, values: await GET('/customers/' + id), onSave: (d) => PUT('/customers/' + id, d),
@@ -584,32 +600,57 @@ actions.editStop = async ({ id }) => openForm({ title: 'Edit route stop', fields
 views.customers = async (id) => {
   if (!id) return customerList();
   const c = await GET('/customers/' + id);
+  window.__cust = c;
+  const histPools = c.pools.length;
+  const tab = (k, l, n) => html`<button data-act="tab" data-tab="${k}" class="${k === (window.__tab || 'overview') ? 'on' : ''}">${l}${n ? html` <span class="chip" style="padding:0 7px">${n}</span>` : ''}</button>`;
+  const pane = (k, body) => html`<div class="tabpane ${k === (window.__tab || 'overview') ? 'on' : ''}" id="tab-${k}">${body}</div>`;
   return html`<p class="small"><a href="#/customers">‹ Customers</a></p>
-  <div class="row spread"><h1 style="margin:0">${c.name}</h1><button class="btn" data-act="editCustomer" data-id="${c.id}">Edit</button></div>
-  <div class="card mt small">
-    <div>📍 ${c.address}${c.city ? ', ' + c.city : ''} ${c.gate_code ? html`· Gate <b>${c.gate_code}</b>` : ''}</div>
-    <div>${c.phone ? html`📞 <a href="tel:${c.phone}">${c.phone}</a>` : ''} ${c.email ? html`· ✉️ <a href="mailto:${c.email}">${c.email}</a>` : ''} · ${money(c.rate)}/visit</div>
-    ${c.notes ? html`<div class="mt">⚠️ ${c.notes}</div>` : ''}</div>
-  <div class="row spread"><h2>Pools & route</h2><button class="btn sm" data-act="newPool" data-cid="${c.id}">+ Add pool</button></div>
-  ${c.pools.length ? c.pools.map((p) => html`<div class="card" style="margin-bottom:10px">
-    <div class="row spread"><div><b>${p.name}</b> <span class="muted small">${p.type} · ${p.volume_gal?.toLocaleString()} gal · ${p.surface} · ${p.sanitizer}</span></div>
-      <span class="row"><button class="btn sm" data-act="editPool" data-id="${p.id}">Edit</button><button class="btn sm" data-act="newStop" data-pool="${p.id}">+ Route stop</button></span></div>
-    ${p.notes ? html`<div class="muted small mt">🔧 ${p.notes}</div>` : ''}
-    ${p.stops.length ? html`<div class="row mt">${p.stops.map((s) => html`<button class="btn sm ${s.active ? '' : 'danger'}" data-act="editStop" data-id="${s.id}">${WEEKDAYS[s.weekday].slice(0, 3)}${s.frequency > 1 ? ` / ${s.frequency}wk` : ''} · ${s.tech_name || 'Unassigned'}${s.active ? '' : ' (paused)'}</button>`)}</div>`
-      : html`<div class="muted small mt">Not on a route yet.</div>`}</div>`)
-    : html`<div class="card empty">Add a pool, then put it on a route.</div>`}
-  <div class="row spread"><h2>Billing</h2>
-    <button class="btn sm primary" data-act="genInvoice" data-cid="${c.id}" ${raw(c.unbilled ? '' : 'disabled')}>Invoice unbilled work (${money(c.unbilled)})</button></div>
-  ${c.invoices.length ? html`<div class="card" style="padding:0"><table><tbody>${c.invoices.map((i) => html`<tr class="click" data-href="#/invoices/${i.id}"><td>#${i.id}</td><td>${fmtDate(i.issued)}</td>
-    <td>${money(i.total)}</td><td><span class="badge ${i.status === 'paid' ? 'ok' : i.due < localISO() ? 'bad' : 'warn'}">${i.status === 'open' && i.due < localISO() ? 'overdue' : i.status}</span></td></tr>`)}</tbody></table></div>`
-    : html`<div class="muted small">No invoices yet.</div>`}
-  ${c.work_orders.length ? html`<h2>Work orders</h2><div class="card" style="padding:0"><table><tbody>${c.work_orders.map((w) => html`<tr><td><b>${w.title}</b><br><span class="muted small">${w.pool_name}</span></td><td>${money(w.price)}</td><td><span class="badge ${w.status === 'done' ? 'ok' : ''}">${w.status}</span></td></tr>`)}</tbody></table></div>` : ''}
-  <h2>Service history</h2>
-  ${c.visits.length ? html`<div class="card" style="padding:0;overflow-x:auto"><table><thead><tr><th>Date</th><th>Tech</th><th>Cl</th><th>pH</th><th>TA</th><th>CYA</th><th>Status</th></tr></thead><tbody>
-    ${c.visits.map((v) => { const bad = new Set(Dosing.issues(v.volume_gal, v).map((i) => i.key)); const cell = (k) => html`<td ${raw(bad.has(k) ? 'style="color:var(--bad);font-weight:700"' : '')}>${v[k] ?? '—'}</td>`;
-      return html`<tr class="click" data-href="#/visit/${v.id}"><td>${fmtDate(v.date)}</td><td>${v.tech_name || '—'}</td>${cell('fc')}${cell('ph')}${cell('ta')}${cell('cya')}<td><span class="badge ${v.status === 'done' ? 'ok' : 'warn'}">${v.status}</span></td></tr>`; })}</tbody></table></div>`
-    : html`<div class="muted small">No completed visits yet.</div>`}`;
+  <div class="card flush"><div class="cbanner">${waves()}</div>
+    <div class="row spread" style="padding:0 22px 20px;align-items:flex-end;margin-top:-34px;position:relative">
+      <div class="row" style="gap:16px;align-items:flex-end;flex-wrap:nowrap"><div style="border:4px solid var(--card);border-radius:50%;display:flex">${avatar(c.name, 72)}</div>
+        <div style="padding-bottom:4px"><h1 style="font-size:23px">${c.name}</h1><div class="muted small">${c.address}${c.city ? ', ' + c.city : ''}</div></div></div>
+      <div class="row">${c.phone ? html`<a class="btn sm" href="tel:${c.phone}">${icon('phone')} Call</a>` : ''}${c.email ? html`<a class="btn sm" href="mailto:${c.email}">${icon('mail')} Email</a>` : ''}
+        <button class="btn sm" data-act="editCustomer" data-id="${c.id}">${icon('edit')} Edit</button></div></div></div>
+  <div class="grid mt stagger">
+    <div class="card kpi"><div class="ico">${icon('drop')}</div><div><div class="n">${histPools}</div><div class="l">Pool${histPools === 1 ? '' : 's'}</div></div></div>
+    <div class="card kpi ok"><div class="ico">${icon('dollar')}</div><div><div class="n">${c.billing_mode === 'monthly' ? money(c.monthly_rate) : money(c.rate)}</div><div class="l">${c.billing_mode === 'monthly' ? 'per month' : 'per visit'}</div></div></div>
+    <div class="card kpi ${c.unbilled ? 'warn' : ''}"><div class="ico">${icon('file')}</div><div><div class="n">${money(c.unbilled)}</div><div class="l">Unbilled work</div></div></div>
+    <div class="card kpi ${c.invoices.some((i) => i.status === 'open') ? 'bad' : ''}"><div class="ico">${icon('clock')}</div><div><div class="n">${money(c.invoices.filter((i) => i.status === 'open').reduce((s, i) => s + i.total, 0))}</div><div class="l">Balance due</div></div></div></div>
+  <div class="tabs">${tab('overview', 'Pools & route')}${tab('service', 'Service history', c.visits.length)}${tab('billing', 'Billing', c.invoices.length)}${tab('work', 'Work orders', c.work_orders.length)}</div>
+  ${pane('overview', html`${c.notes || c.gate_code ? html`<div class="card small" style="margin-bottom:14px">${c.gate_code ? html`<span class="chip">Gate ${c.gate_code}</span> ` : ''}${c.notes ? html`⚠️ ${c.notes}` : ''}</div>` : ''}
+    <div class="row spread"><h3>Pools</h3><button class="btn sm" data-act="newPool" data-cid="${c.id}">${icon('plus')} Add pool</button></div>
+    <div class="grid mt stagger" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">${c.pools.length ? c.pools.map((p) => html`<div class="card lift">
+      <div class="row spread"><div class="row" style="gap:12px"><span class="kpi" style="padding:0"><span class="ico" style="width:40px;height:40px;border-radius:12px">${icon('drop')}</span></span><div><b>${p.name}</b><div class="muted small">${p.type} · ${p.volume_gal?.toLocaleString()} gal · ${p.surface} · ${p.sanitizer}</div></div></div>
+        <span class="row" style="gap:6px"><button class="btn sm" data-act="editPool" data-id="${p.id}">Edit</button></span></div>
+      ${p.notes ? html`<div class="muted small mt">🔧 ${p.notes}</div>` : ''}
+      <div class="row mt">${p.stops.map((s) => html`<button class="btn sm ${s.active ? 'accent' : 'danger'}" data-act="editStop" data-id="${s.id}">${WEEKDAYS[s.weekday].slice(0, 3)}${s.frequency > 1 ? ` · ${s.frequency}wk` : ''} · ${s.tech_name || 'Unassigned'}${s.active ? '' : ' (paused)'}</button>`)}
+        <button class="btn sm" data-act="newStop" data-pool="${p.id}">${icon('plus')} Route stop</button></div></div>`)
+      : emptyState('No pools yet', 'Add a pool, then put it on a route.')}</div>`)}
+  ${pane('service', html`${c.visits.some((v) => v.fc != null || v.ph != null) ? html`<div class="card"><div class="row spread"><h3>Water chemistry trend</h3>
+      <div class="seg" id="metricseg">${[['ph', 'pH'], ['fc', 'Chlorine'], ['ta', 'Alkalinity'], ['cya', 'Stabilizer']].map(([k, l], i) => html`<button class="${i === 0 ? 'on' : ''}" data-act="metric" data-k="${k}">${l}</button>`)}</div></div>
+      <div id="mchart" style="margin-top:8px">${metricChart(c.visits, 'ph')}</div><div class="muted small">Shaded band is the healthy range. Dots turn amber or red when a reading is outside it.</div></div>` : ''}
+    ${c.visits.length ? html`<div class="card flush mt" style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Tech</th><th>Cl</th><th>pH</th><th>TA</th><th>CYA</th><th>Status</th></tr></thead><tbody>
+      ${c.visits.map((v) => { const bad = new Set(Dosing.issues(v.volume_gal, v).map((i) => i.key)); const cell = (k) => html`<td ${raw(bad.has(k) ? 'style="color:var(--bad);font-weight:800"' : '')}>${v[k] ?? '—'}</td>`;
+        return html`<tr class="click" data-href="#/visit/${v.id}"><td>${fmtDate(v.date)}</td><td>${v.tech_name || '—'}</td>${cell('fc')}${cell('ph')}${cell('ta')}${cell('cya')}<td><span class="badge ${v.status === 'done' ? 'ok' : 'warn'}">${v.status}</span></td></tr>`; })}</tbody></table></div>`
+      : emptyState('No visits yet', 'Completed visits and test results appear here.')}`)}
+  ${pane('billing', html`<div class="row spread"><h3>Invoices</h3>
+      <button class="btn sm primary" data-act="genInvoice" data-cid="${c.id}" ${raw(c.unbilled ? '' : 'disabled')}>Invoice unbilled work (${money(c.unbilled)})</button></div>
+    ${c.invoices.length ? html`<div class="card flush mt"><table><tbody>${c.invoices.map((i) => html`<tr class="click" data-href="#/invoices/${i.id}"><td><b>#${i.id}</b></td><td>${fmtDate(i.issued)}</td>
+      <td>${money(i.total)}</td><td><span class="badge ${i.status === 'paid' ? 'ok' : i.due < localISO() ? 'bad' : 'warn'}">${i.status === 'open' && i.due < localISO() ? 'overdue' : i.status}</span></td></tr>`)}</tbody></table></div>`
+      : emptyState('No invoices yet', 'Bill completed visits and repairs in one click.')}`)}
+  ${pane('work', c.work_orders.length ? html`<div class="card flush"><table><tbody>${c.work_orders.map((w) => html`<tr><td><b>${w.title}</b><br><span class="muted small">${w.pool_name}</span></td><td>${money(w.price)}</td><td><span class="badge ${w.status === 'done' ? 'ok' : ''}">${w.status}</span></td></tr>`)}</tbody></table></div>`
+    : emptyState('No work orders', 'Repairs and quotes you approve show up here.'))}`;
 };
+actions.tab = ({ tab }) => {
+  window.__tab = tab;
+  document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+  document.querySelectorAll('.tabpane').forEach((p) => p.classList.toggle('on', p.id === 'tab-' + tab));
+};
+actions.metric = ({ k }, el) => {
+  el.parentElement.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === el));
+  $('#mchart').innerHTML = metricChart(window.__cust.visits, k).s;
+};
+window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/customers/')) window.__tab = null; });
 actions.genInvoice = async ({ cid }) => { const inv = await POST('/invoices/generate', { customer_id: Number(cid) }); toast('Invoice #' + inv.id + ' created'); location.hash = '#/invoices/' + inv.id; };
 
 // ---------- Work orders ----------

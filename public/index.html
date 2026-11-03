@@ -10,16 +10,22 @@
 <link rel="apple-touch-icon" href="/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap">
+<script src="theme.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div class="shell">
 <nav id="nav" aria-label="Main"></nav>
-<main id="app"><p class="muted">Loading…</p></main>
+<div class="work"><header id="topbar"></header><main id="app"><p class="muted">Loading…</p></main></div>
+</div>
 <dialog id="modal"></dialog>
 <div id="toast" role="status"></div>
 <script src="dosing.js"></script>
 <script src="geo.js"></script>
 <script src="app.js"></script>
+<script src="ui.js"></script>
 <script src="features.js"></script>
 <script src="boot.js"></script>
 </body>

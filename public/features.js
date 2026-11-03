@@ -52,17 +52,22 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 // ---------- sign in / first-run setup ----------
 function showAuth(needsSetup) {
   document.body.classList.add('auth');
-  $('#nav').innerHTML = '';
-  app.innerHTML = html`<div class="auth-wrap"><form id="authform" class="card auth-card" data-setup="${needsSetup ? 1 : 0}">
-    <div class="row" style="gap:12px;margin-bottom:6px"><span class="logo">${icon('wave')}</span><div><h1 style="font-size:22px">SplashDesk</h1><div class="muted small">Pool service management</div></div></div>
-    <h2 style="margin:18px 0 4px">${needsSetup ? 'Create your account' : 'Sign in'}</h2>
-    ${needsSetup ? html`<p class="muted small" style="margin:0 0 12px">You'll be the owner. You can add office staff and technicians afterwards.</p>` : ''}
-    <div class="fields" style="grid-template-columns:1fr">
-      ${needsSetup ? html`<label>Company name<input name="company" autocomplete="organization" required></label><label>Your name<input name="name" autocomplete="name" required></label>` : ''}
-      <label>Email<input name="email" type="email" autocomplete="username" required></label>
-      <label>Password<input name="password" type="password" autocomplete="${needsSetup ? 'new-password' : 'current-password'}" minlength="${needsSetup ? 8 : 1}" required>${needsSetup ? html`<span class="muted small">At least 8 characters.</span>` : ''}</label>
-    </div><div class="error" id="autherr" role="alert"></div>
-    <button class="btn primary big" style="width:100%;justify-content:center;margin-top:8px">${needsSetup ? 'Create account' : 'Sign in'}</button></form></div>`.s;
+  $('#nav').innerHTML = ''; $('#topbar').innerHTML = '';
+  const bubbles = Array.from({ length: 11 }, (_, i) => { const s = 10 + ((i * 37) % 34); return `<i style="width:${s}px;height:${s}px;left:${(i * 9 + 4) % 96}%;animation-duration:${9 + ((i * 5) % 9)}s;animation-delay:${-(i * 1.7)}s"></i>`; }).join('');
+  const perks = [['route', 'Optimized routes that cut drive time'], ['drop', 'Dosing guidance on every visit'], ['dollar', 'Invoices and card payments in one place']];
+  app.innerHTML = html`<div class="auth-split"><aside class="auth-hero"><div class="row" style="gap:12px"><span class="logo">${icon('wave')}</span><b style="font-size:20px;letter-spacing:-.02em">SplashDesk</b></div>
+    <div><h2>Run your pool route like a pro.</h2><p>Schedule smarter, test and dose faster, and get paid sooner — from the office or the backyard.</p>
+      <ul>${perks.map(([ic, t], i) => html`<li style="--i:${i}"><i>${icon(ic)}</i>${t}</li>`)}</ul></div>
+    <div class="bubbles" aria-hidden="true">${raw(bubbles)}</div>${waves()}</aside>
+    <div class="auth-form"><form id="authform" class="auth-card" data-setup="${needsSetup ? 1 : 0}">
+      <h1 style="font-size:28px">${needsSetup ? 'Create your account' : 'Welcome back'}</h1>
+      <p class="muted" style="margin:6px 0 22px">${needsSetup ? "You'll be the owner. Add office staff and technicians afterwards." : 'Sign in to your SplashDesk workspace.'}</p>
+      <div class="fields" style="grid-template-columns:1fr">
+        ${needsSetup ? html`<label>Company name<input name="company" autocomplete="organization" required></label><label>Your name<input name="name" autocomplete="name" required></label>` : ''}
+        <label>Email<input name="email" type="email" autocomplete="username" required></label>
+        <label>Password<input name="password" type="password" autocomplete="${needsSetup ? 'new-password' : 'current-password'}" minlength="${needsSetup ? 8 : 1}" required>${needsSetup ? html`<span class="muted small">At least 8 characters.</span>` : ''}</label>
+      </div><div class="error" id="autherr" role="alert"></div>
+      <button class="btn primary big" style="width:100%;margin-top:8px">${needsSetup ? 'Create account' : 'Sign in'}</button></form></div></div>`.s;
   $('#authform input')?.focus();
 }
 window.showAuth = showAuth;

@@ -1,5 +1,6 @@
 'use strict';
 const http = require('node:http');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { open } = require('./lib/db');
@@ -94,7 +95,7 @@ function createApp(db, opts = {}) {
   crud('/api/techs', 'techs', ['name', 'phone', 'color'], { required: ['name'], order: 'name' });
 
   // ---- customers ----
-  const CUST = ['name', 'phone', 'email', 'address', 'city', 'gate_code', 'notes', 'rate', 'lat', 'lng'];
+  const CUST = ['name', 'phone', 'email', 'address', 'city', 'gate_code', 'notes', 'rate', 'lat', 'lng', 'billing_mode', 'monthly_rate', 'taxable', 'notify_email', 'notify_sms', 'autopay'];
   route('GET', '/api/customers', ({ query }) =>
     all(`SELECT c.*, (SELECT COUNT(*) FROM pools p WHERE p.customer_id=c.id) AS pools,
          COALESCE((SELECT SUM(total) FROM invoices i WHERE i.customer_id=c.id AND i.status='open'),0) AS balance
@@ -204,7 +205,10 @@ function createApp(db, opts = {}) {
     if (body.status === 'done' && !cur.completed_at && body.completed_at === undefined) body.completed_at = now;
     if (body.status === 'scheduled') body.completed_at = null;
     updateRow('visits', VISIT, VJSON, params.id, body);
-    return parseJson(one(`${VISIT_SELECT} WHERE v.id=?`, params.id), VJSON);
+    ctx.syncVisitInventory?.(Number(params.id));
+    const out = parseJson(one(`${VISIT_SELECT} WHERE v.id=?`, params.id), VJSON);
+    if (out.status === 'done' && cur.status !== 'done') fire(hooks.visitDone, out).catch(() => {});   // service report email etc.
+    return out;
   });
   route('DELETE', '/api/visits/:id', ({ params }) => {
     const v = one('SELECT invoice_id FROM visits WHERE id=?', params.id);
@@ -243,58 +247,85 @@ function createApp(db, opts = {}) {
 
   // ---- invoices ----
   const round2 = (n) => Math.round(n * 100) / 100;
-  function unbilled(customerId) {
+  const baseUrl = (req) => (process.env.PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`).replace(/\/$/, '');
+  const monthLabel = (p) => new Date(p + '-01T12:00:00Z').toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const hooks = { invoiceCreated: [], visitDone: [] };
+  const fire = (list, ...args) => Promise.allSettled(list.map((f) => f(...args)));
+
+  // Everything billable for a customer right now. Per-visit customers pay per completed visit;
+  // monthly customers pay one flat fee per calendar month. Chemicals and repairs are always itemised.
+  function unbilled(customerId, period = utcToday().slice(0, 7)) {
+    const c = one('SELECT * FROM customers WHERE id=?', customerId), st = getSettings();
+    const monthly = c.billing_mode === 'monthly';
     const visits = all(
-      `SELECT v.* , p.name AS pool_name FROM visits v JOIN pools p ON p.id=v.pool_id
-       WHERE p.customer_id=? AND v.status='done' AND v.invoice_id IS NULL ORDER BY v.date, v.id`, customerId).map((v) => parseJson(v, VJSON));
-    const wos = all(
-      `SELECT w.* FROM work_orders w JOIN pools p ON p.id=w.pool_id
-       WHERE p.customer_id=? AND w.status='done' AND w.invoice_id IS NULL ORDER BY w.id`, customerId);
+      `SELECT v.*, p.name AS pool_name FROM visits v JOIN pools p ON p.id=v.pool_id
+       WHERE p.customer_id=? AND v.status='done' AND v.invoice_id IS NULL ${monthly ? 'AND v.date <= ?' : ''} ORDER BY v.date, v.id`,
+      customerId, ...(monthly ? [period + '-31'] : [])).map((v) => parseJson(v, VJSON));
+    const wos = all(`SELECT w.* FROM work_orders w JOIN pools p ON p.id=w.pool_id WHERE p.customer_id=? AND w.status='done' AND w.invoice_id IS NULL ORDER BY w.id`, customerId);
+    const rate = Number(st.tax_rate) || 0, taxableCustomer = !!c.taxable && rate > 0;
     const items = [];
-    for (const v of visits) {
-      if (v.price > 0) items.push({ desc: `Pool service — ${v.pool_name} (${v.date})`, qty: 1, price: v.price });
-      for (const ch of v.chemicals) if (Number(ch.charge) > 0) items.push({ desc: `${ch.name} ${ch.qty || ''} ${ch.unit || ''} (${v.date})`.replace(/\s+/g, ' ').trim(), qty: 1, price: Number(ch.charge) });
+    const push = (desc, price, kind) => items.push({ desc, qty: 1, price, kind, taxable: taxableCustomer && (kind !== 'service' || !!st.tax_services) });
+    let billedPeriod = null;
+    if (monthly) {
+      const already = one('SELECT 1 AS x FROM invoices WHERE customer_id=? AND period=?', customerId, period);
+      const active = one('SELECT 1 AS x FROM stops s JOIN pools p ON p.id=s.pool_id WHERE p.customer_id=? AND s.active=1', customerId);
+      if (!already && c.monthly_rate > 0 && (active || visits.length)) { push(`Monthly pool service — ${monthLabel(period)}`, c.monthly_rate, 'service'); billedPeriod = period; }
     }
-    for (const w of wos) if (w.price > 0) items.push({ desc: `Repair: ${w.title}`, qty: 1, price: w.price });
-    return { visits, wos, items, total: round2(items.reduce((s, i) => s + i.qty * i.price, 0)) };
+    for (const x of visits) {
+      if (!monthly && x.price > 0) push(`Pool service — ${x.pool_name} (${x.date})`, x.price, 'service');
+      for (const ch of x.chemicals) if (Number(ch.charge) > 0) push(`${ch.name} ${ch.qty || ''} ${ch.unit || ''} (${x.date})`.replace(/\s+/g, ' ').trim(), Number(ch.charge), 'chemical');
+    }
+    for (const w of wos) if (w.price > 0) push(`Repair: ${w.title}`, w.price, 'repair');
+    const subtotal = round2(items.reduce((s, i) => s + i.qty * i.price, 0));
+    const tax = round2(items.filter((i) => i.taxable).reduce((s, i) => s + i.qty * i.price, 0) * rate / 100);
+    return { visits, wos, items, subtotal, tax, total: round2(subtotal + tax), period: billedPeriod };
   }
-  const invoiceFull = (id) => {
-    const inv = one(`SELECT i.*, c.name AS customer_name, c.address, c.city, c.email FROM invoices i JOIN customers c ON c.id=i.customer_id WHERE i.id=?`, id);
+  const invoiceFull = (id, req) => {
+    const inv = one(`SELECT i.*, c.name AS customer_name, c.address, c.city, c.email, c.autopay FROM invoices i JOIN customers c ON c.id=i.customer_id WHERE i.id=?`, id);
     if (!inv) throw notFound();
-    return parseJson(inv, ['items']);
+    parseJson(inv, ['items']);
+    if (req && inv.token) inv.pay_url = `${baseUrl(req)}/pay/${inv.token}`;
+    return inv;
   };
+  function generateInvoice({ customer_id, issued, period }) {
+    if (!one('SELECT id FROM customers WHERE id=?', customer_id)) throw bad('unknown customer');
+    const u = unbilled(customer_id, period);
+    if (!u.items.length) throw bad('Nothing to invoice');
+    const st = getSettings(), iss = isDate(issued) ? issued : utcToday();
+    db.exec('BEGIN');
+    try {
+      const id = Number(run('INSERT INTO invoices (customer_id, issued, due, items, subtotal, tax, total, period, token) VALUES (?,?,?,?,?,?,?,?,?)',
+        customer_id, iss, addDays(iss, Number(st.due_days) || 14), JSON.stringify(u.items), u.subtotal, u.tax, u.total, u.period, crypto.randomBytes(16).toString('hex')).lastInsertRowid);
+      for (const x of u.visits) run('UPDATE visits SET invoice_id=? WHERE id=?', id, x.id);
+      for (const w of u.wos) run('UPDATE work_orders SET invoice_id=? WHERE id=?', id, w.id);
+      db.exec('COMMIT');
+      return id;
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+  }
+  const markPaid = (id, method, date = utcToday()) => run(`UPDATE invoices SET status='paid', paid_at=?, method=? WHERE id=? AND status!='paid'`, date, method || '', id).changes;
   route('GET', '/api/invoices', ({ query }) =>
     all(`SELECT i.id,i.customer_id,i.issued,i.due,i.status,i.total,i.paid_at, c.name AS customer_name
          FROM invoices i JOIN customers c ON c.id=i.customer_id ${query.status ? 'WHERE i.status=?' : ''} ORDER BY i.id DESC`,
       ...(query.status ? [query.status] : [])));
-  route('GET', '/api/invoices/:id', ({ params }) => invoiceFull(params.id));
-  route('POST', '/api/invoices/generate', ({ body }) => {
-    if (!one('SELECT id FROM customers WHERE id=?', body.customer_id)) throw bad('unknown customer');
-    const u = unbilled(body.customer_id);
-    if (!u.items.length) throw bad('Nothing to invoice');
-    const issued = isDate(body.issued) ? body.issued : utcToday();
-    const due = isDate(body.due) ? body.due : addDays(issued, 14);
-    db.exec('BEGIN');
-    try {
-      const id = Number(run('INSERT INTO invoices (customer_id, issued, due, items, total) VALUES (?,?,?,?,?)',
-        body.customer_id, issued, due, JSON.stringify(u.items), u.total).lastInsertRowid);
-      for (const v of u.visits) run('UPDATE visits SET invoice_id=? WHERE id=?', id, v.id);
-      for (const w of u.wos) run('UPDATE work_orders SET invoice_id=? WHERE id=?', id, w.id);
-      db.exec('COMMIT');
-      return invoiceFull(id);
-    } catch (e) { db.exec('ROLLBACK'); throw e; }
+  route('GET', '/api/invoices/:id', ({ params, req }) => invoiceFull(params.id, req));
+  route('POST', '/api/invoices/generate', async ({ body, req }) => {
+    const id = generateInvoice(body);
+    const inv = invoiceFull(id, req);
+    await fire(hooks.invoiceCreated, inv, req);     // notifications, autopay
+    return invoiceFull(id, req);
   });
-  route('POST', '/api/invoices/:id/pay', ({ params, body }) => {
-    const r = run(`UPDATE invoices SET status='paid', paid_at=?, method=? WHERE id=?`, isDate(body.paid_at) ? body.paid_at : utcToday(), body.method || '', params.id);
-    if (!r.changes) throw notFound();
-    return invoiceFull(params.id);
+  route('POST', '/api/invoices/:id/pay', ({ params, body, req }) => {
+    if (!one('SELECT id FROM invoices WHERE id=?', params.id)) throw notFound();
+    markPaid(params.id, body.method, isDate(body.paid_at) ? body.paid_at : utcToday());
+    return invoiceFull(params.id, req);
   });
-  route('POST', '/api/invoices/:id/reopen', ({ params }) => {
+  route('POST', '/api/invoices/:id/reopen', ({ params, req }) => {
     if (!run(`UPDATE invoices SET status='open', paid_at=NULL, method='' WHERE id=?`, params.id).changes) throw notFound();
-    return invoiceFull(params.id);
+    return invoiceFull(params.id, req);
   });
   route('DELETE', '/api/invoices/:id', ({ params }) => {   // void: releases the billed items again
-    invoiceFull(params.id);
+    const inv = invoiceFull(params.id);
+    if (inv.status === 'paid' && inv.method && /stripe/i.test(inv.method)) throw bad('This invoice was paid by card — refund it in Stripe first, then void it');
     run('UPDATE visits SET invoice_id=NULL WHERE invoice_id=?', params.id);
     run('UPDATE work_orders SET invoice_id=NULL WHERE invoice_id=?', params.id);
     run('DELETE FROM invoices WHERE id=?', params.id);
@@ -302,7 +333,11 @@ function createApp(db, opts = {}) {
   });
 
   // ---- settings (depot, speeds) ----
-  const SETTING_DEFAULTS = { depot_name: 'Shop', depot_address: '', depot_lat: null, depot_lng: null, speed_mph: 25, service_min: 25, round_trip: 1 };
+  const SETTING_DEFAULTS = {
+    depot_name: 'Shop', depot_address: '', depot_lat: null, depot_lng: null, speed_mph: 25, service_min: 25, round_trip: 1,
+    company_name: '', company_email: '', company_phone: '', invoice_footer: '', tax_rate: 0, tax_services: 0, due_days: 14,
+    skip_dates: [], osrm_url: '',
+  };
   const getSettings = () => {
     const out = { ...SETTING_DEFAULTS };
     for (const r of all('SELECT key, value FROM settings')) if (r.key in out) out[r.key] = JSON.parse(r.value);
@@ -315,7 +350,10 @@ function createApp(db, opts = {}) {
       const numeric = typeof SETTING_DEFAULTS[k] === 'number' || k.endsWith('_lat') || k.endsWith('_lng');
       let x = numeric ? (v === '' || v === null ? null : Number(v)) : v;
       if (numeric && x !== null && isNaN(x)) throw bad(`${k} must be a number`);
-      if (['speed_mph', 'service_min'].includes(k) && !(x > 0)) throw bad(`${k} must be positive`);
+      if (['speed_mph', 'service_min', 'due_days'].includes(k) && !(x > 0)) throw bad(`${k} must be positive`);
+      if (k === 'tax_rate' && !(x >= 0 && x <= 30)) throw bad('tax_rate must be between 0 and 30');
+      if (k === 'skip_dates') { x = Array.isArray(v) ? v : String(v || '').split(/[\s,;]+/).filter(Boolean); if (!x.every(isDate)) throw bad('skip_dates must be YYYY-MM-DD dates'); }
+      if (k === 'osrm_url' && x && !/^https?:\/\//.test(x)) throw bad('osrm_url must start with http(s)://');
       run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, JSON.stringify(x));
     }
     return getSettings();
@@ -406,6 +444,20 @@ function createApp(db, opts = {}) {
   });
 
   // ---- dashboard + dosing ----
+  // Last 8 weeks (Mon–Sun): visits completed, billed and collected — drives the dashboard charts.
+  function weeklyTrend(date) {
+    const d = new Date(date + 'T00:00:00Z'), monday = addDays(date, -((d.getUTCDay() + 6) % 7));
+    const weeks = Array.from({ length: 8 }, (_, i) => addDays(monday, (i - 7) * 7));
+    return weeks.map((w) => {
+      const end = addDays(w, 6);
+      return {
+        week: w,
+        visits: one(`SELECT COUNT(*) AS n FROM visits WHERE status='done' AND date BETWEEN ? AND ?`, w, end).n,
+        billed: one(`SELECT COALESCE(SUM(total),0) AS n FROM invoices WHERE issued BETWEEN ? AND ?`, w, end).n,
+        collected: one(`SELECT COALESCE(SUM(total),0) AS n FROM invoices WHERE status='paid' AND paid_at BETWEEN ? AND ?`, w, end).n,
+      };
+    });
+  }
   route('GET', '/api/dashboard', ({ query }) => {
     const date = isDate(query.date) ? query.date : utcToday();
     ensureVisits(db, date);
@@ -426,14 +478,25 @@ function createApp(db, opts = {}) {
       outstanding: one(`SELECT COALESCE(SUM(total),0) AS n FROM invoices WHERE status='open'`).n,
       overdue: one(`SELECT COALESCE(SUM(total),0) AS n FROM invoices WHERE status='open' AND due < ?`, date).n,
       paid_this_month: one(`SELECT COALESCE(SUM(total),0) AS n FROM invoices WHERE status='paid' AND substr(paid_at,1,7)=?`, month).n,
-      customers: one('SELECT COUNT(*) AS n FROM customers').n,
+      customers: one('SELECT COUNT(*) AS n FROM customers WHERE archived=0').n,
+      trend: weeklyTrend(date),
       attention,
     };
   });
   route('POST', '/api/dose', ({ body }) => Dosing.analyze(body.volume, body.readings || {}));
+  // Counts for sidebar badges and the notification bell.
+  route('GET', '/api/badges', ({ query }) => {
+    const today = isDate(query.date) ? query.date : utcToday();
+    return {
+      invoices_overdue: one(`SELECT COUNT(*) AS n FROM invoices WHERE status='open' AND due < ?`, today).n,
+      work_orders_open: one(`SELECT COUNT(*) AS n FROM work_orders WHERE status!='done'`).n,
+      quotes_waiting: one(`SELECT COUNT(*) AS n FROM quotes WHERE status='sent'`).n,
+      low_stock: one(`SELECT COUNT(*) AS n FROM products WHERE active=1 AND low_stock>0 AND stock<=low_stock`).n,
+    };
+  });
 
   // ---- feature modules (each registers its own routes) ----
-  const ctx = { db, route, one, all, run, bad, notFound, HttpError, opts, parseJson, insertRow, updateRow, isDate, addDays, utcToday, ensureVisits, getSettings, round2: (n) => Math.round(n * 100) / 100 };
+  const ctx = { db, route, one, all, run, bad, notFound, HttpError, opts, parseJson, insertRow, updateRow, isDate, addDays, utcToday, ensureVisits, getSettings, round2, baseUrl, hooks, fire, invoiceFull, generateInvoice, unbilled, markPaid, monthLabel, VISIT_SELECT, VJSON };
   Auth.register(ctx);
   Ops.register(ctx);
   for (const m of opts.modules || require('./lib/modules')) m.register(ctx);
@@ -478,7 +541,7 @@ function createApp(db, opts = {}) {
   }
   const SECURITY = {
     'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY',
-    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob: https://*.tile.openstreetmap.org; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; script-src 'self' https://cdnjs.cloudflare.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob: https://*.tile.openstreetmap.org; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' https://cdnjs.cloudflare.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   };
   const send = (res, status, data, reply = { headers: {} }) => {
     if (data && data.__raw) { res.writeHead(data.__raw.status, { ...SECURITY, 'Cache-Control': 'no-store', ...data.__raw.headers, ...reply.headers }); return res.end(data.__raw.body); }
