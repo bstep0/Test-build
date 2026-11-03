@@ -145,7 +145,7 @@ function createApp(db, opts = {}) {
     run(`DELETE FROM visits WHERE stop_id=? AND status='scheduled' AND arrived_at IS NULL AND date >= ?
          AND fc IS NULL AND ph IS NULL AND ta IS NULL AND cya IS NULL AND ch IS NULL AND salt IS NULL AND temp IS NULL
          AND tasks='[]' AND chemicals='[]' AND notes=''`, stopId, addDays(utcToday(), -1)); // never discard a tech's draft
-  crud('/api/stops', 'stops', ['pool_id', 'tech_id', 'weekday', 'frequency', 'position', 'active', 'start_date'], {
+  crud('/api/stops', 'stops', ['pool_id', 'tech_id', 'weekday', 'frequency', 'position', 'active', 'start_date', 'end_date'], {
     required: ['pool_id', 'weekday'],
     order: 'weekday, position',
     defaults: () => ({ start_date: utcToday() }),
@@ -153,7 +153,7 @@ function createApp(db, opts = {}) {
       write: (id, body, kind) => {  // reordering alone must not reshuffle; anything else regenerates lazily
         if (kind === 'update' && body.position !== undefined)
           run(`UPDATE visits SET position=? WHERE stop_id=? AND status='scheduled' AND date >= ?`, body.position, id, addDays(utcToday(), -1));
-        if (kind === 'update' && ['tech_id', 'weekday', 'frequency', 'active', 'start_date'].some((k) => body[k] !== undefined)) dropFuture(id);
+        if (kind === 'update' && ['tech_id', 'weekday', 'frequency', 'active', 'start_date', 'end_date'].some((k) => body[k] !== undefined)) dropFuture(id);
       },
       beforeDelete: (id) => dropFuture(id),
     },
@@ -336,7 +336,7 @@ function createApp(db, opts = {}) {
   const SETTING_DEFAULTS = {
     depot_name: 'Shop', depot_address: '', depot_lat: null, depot_lng: null, speed_mph: 25, service_min: 25, round_trip: 1,
     company_name: '', company_email: '', company_phone: '', invoice_footer: '', tax_rate: 0, tax_services: 0, due_days: 14,
-    skip_dates: [], osrm_url: '',
+    skip_dates: [], osrm_url: '', auto_reports: 1, auto_invoice_email: 1, auto_reminders: 1, cost_per_mile: 0.67,
   };
   const getSettings = () => {
     const out = { ...SETTING_DEFAULTS };
@@ -395,7 +395,17 @@ function createApp(db, opts = {}) {
 
   // Optimise either a calendar day's visits ({date}) or the recurring weekday template ({weekday}).
   // One independent route per technician. `apply: false` previews without saving.
-  route('POST', '/api/routes/optimize', ({ body }) => {
+  // Real road distances (miles) between [depot, ...located stops] via an OSRM-compatible server; null on any failure.
+  async function roadMatrix(url, nodes) {
+    try {
+      const coords = nodes.map((n) => `${n.lng},${n.lat}`).join(';');
+      const r = await (opts.osrmFetch || fetch)(`${url.replace(/\/$/, '')}/table/v1/driving/${coords}?annotations=distance`, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) return null;
+      const j = await r.json();
+      return j.code === 'Ok' && Array.isArray(j.distances) && j.distances.every((row) => row.every((x) => typeof x === 'number')) ? j.distances.map((row) => row.map((m) => m / 1609.344)) : null;
+    } catch { return null; }
+  }
+  route('POST', '/api/routes/optimize', async ({ body }) => {
     const st = getSettings(), depot = depotOf(st), roundTrip = !!st.round_trip;
     const byDate = isDate(body.date);
     if (!byDate && !(Number.isInteger(body.weekday) && body.weekday >= 0 && body.weekday <= 6)) throw bad('date or weekday is required');
@@ -419,9 +429,14 @@ function createApp(db, opts = {}) {
     for (const [techId, list] of groups) {
       const fixed = list.filter((r) => r.status !== 'scheduled');          // done/skipped visits stay put
       const movable = list.filter((r) => r.status === 'scheduled');
-      const o = Geo.optimizeItems(depot, movable, { roundTrip });
+      const located = movable.filter(Geo.has);
+      const matrix = st.osrm_url && depot && located.length >= 3 ? await roadMatrix(st.osrm_url, [depot, ...located]) : null;
+      if (matrix) result.routing = 'roads'; else result.routing = result.routing || 'estimate';
+      const o = Geo.optimizeItems(depot, movable, { roundTrip, matrix });
       const base = fixed.reduce((m, r) => Math.max(m, r.position), 0);
+      const timeOf = (miles, n) => (matrix ? (miles / (st.speed_mph || 25)) * 60 + n * st.service_min : null);
       const before = Geo.stats(depot, movable, opts), after = Geo.stats(depot, o.ordered, opts);
+      if (matrix) { before.totalMin = timeOf(o.before, movable.length); after.totalMin = timeOf(o.after, o.ordered.length); }
       result.groups.push({
         tech_id: techId || null, tech_name: techId ? one('SELECT name FROM techs WHERE id=?', techId)?.name : 'Unassigned',
         count: movable.length, located: before.located, before_miles: o.before, after_miles: o.after,
@@ -505,6 +520,7 @@ function createApp(db, opts = {}) {
   const PUBLIC_API = [/^\/api\/auth\/(me|setup|login|logout)$/, /^\/api\/public\//, /^\/api\/stripe\/webhook$/];
   const MAX_BODY = (p) => (/\/photos$/.test(p) ? 12e6 : 1e6);
   async function handleApi(req, res, url) {
+    ctx.currentReq = req;
     const reply = { headers: {} }, pathname = url.pathname, mutating = !['GET', 'HEAD'].includes(req.method);
     let body = {}, rawBody = '';
     if (req.method === 'POST' || req.method === 'PUT') {

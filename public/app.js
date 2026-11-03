@@ -158,9 +158,9 @@ function fieldHtml(f, v) {
   else input = html`<input name="${f.name}" type="${f.type || 'text'}" value="${val_}" ${raw(f.step ? `step="${f.step}"` : '')} ${raw(f.required ? 'required' : '')} ${raw(f.type === 'tel' ? 'inputmode="tel"' : '')}>`;
   return html`<label${raw(cls)}>${f.label}${input}</label>`;
 }
-function openForm({ title, fields, values = {}, onSave, onDelete, saveLabel = 'Save', message, deleteLabel = 'Delete', deleteMsg = 'Delete this permanently?' }) {
+function openForm({ title, fields, values = {}, onSave, onDelete, saveLabel = 'Save', message, footer, deleteLabel = 'Delete', deleteMsg = 'Delete this permanently?' }) {
   modal.innerHTML = html`<form method="dialog" id="mform"><h3 class="dt">${title}</h3>${message ? html`<div class="msg">${message}</div>` : html`<div style="height:12px"></div>`}
-    ${fields.length ? html`<div class="fields">${fields.map((f) => fieldHtml(f, values))}</div>` : ''}
+    ${fields.length ? html`<div class="fields">${fields.map((f) => fieldHtml(f, values))}</div>` : ''}${footer || ''}
     <div class="row spread mt"><div>${onDelete ? html`<button type="button" class="btn danger" data-m="delete">${deleteLabel}</button>` : ''}</div>
     <div class="row"><button type="button" class="btn" data-m="cancel">Cancel</button><button class="btn primary">${saveLabel}</button></div></div></form>`.s;
   const form = $('#mform', modal);
@@ -481,8 +481,9 @@ actions.geoForm = async () => {
 const TASKS = ['Skim surface', 'Brush walls & steps', 'Vacuum', 'Empty baskets', 'Clean filter', 'Backwash', 'Check equipment', 'Test water'];
 const READINGS = [['fc', 'Free Cl', 0.5], ['ph', 'pH', 0.1], ['ta', 'Alkalinity', 5], ['cya', 'Stabilizer', 5], ['ch', 'Calcium', 10], ['salt', 'Salt', 100], ['temp', 'Temp °F', 1]];
 
-const chemRow = (c = {}) => html`<div class="chem"><input placeholder="Chemical" data-c="name" value="${c.name}"><input placeholder="Qty" inputmode="decimal" data-c="qty" value="${c.qty}">
-  <input placeholder="Unit" data-c="unit" value="${c.unit}"><input placeholder="$ charge" inputmode="decimal" data-c="charge" value="${c.charge}"><button type="button" class="btn sm" data-act="rmChem" aria-label="Remove">✕</button></div>`;
+const chemRow = (c = {}) => html`<div class="chem"><input placeholder="Chemical" list="prodlist" data-c="name" value="${c.name}"><input placeholder="Qty" inputmode="decimal" data-c="qty" value="${c.qty}">
+  <input placeholder="Unit" data-c="unit" value="${c.unit}"><input placeholder="$ charge" inputmode="decimal" data-c="charge" value="${c.charge}"><button type="button" class="btn sm" data-act="rmChem" aria-label="Remove">✕</button>
+  <input type="hidden" data-c="product_id" value="${c.product_id}"><input type="hidden" data-c="cost" value="${c.cost}"></div>`;
 const findingsHtml = (volume, r) => {
   const list = Dosing.analyze(volume, r);
   if (!list.length) return html`<p class="muted small">Enter readings to see dosing guidance.</p>`;
@@ -494,7 +495,8 @@ const findingsHtml = (volume, r) => {
 const collectReadings = (root) => Object.fromEntries(READINGS.map(([k]) => [k, num($(`[name=${k}]`, root)?.value)]));
 
 views.visit = async (id) => {
-  const [v, ts] = await Promise.all([GET('/visits/' + id), techs()]);
+  const [v, ts, prods] = await Promise.all([GET('/visits/' + id), techs(), GET('/products').catch(() => [])]);
+  window.__prods = prods.filter((p) => p.active);
   const locked = !!v.invoice_id, prev = v.previous;
   const lastOf = (k) => (prev && prev[k] != null ? `last visit: ${prev[k]}` : '');
   const stage = v.status === 'done' ? 3 : v.arrived_at ? 2 : 1;
@@ -517,7 +519,7 @@ views.visit = async (id) => {
   <h2>Tasks</h2>
   <div class="tasks">${TASKS.map((t) => html`<label class="task"><input type="checkbox" name="task" value="${t}" ${raw(v.tasks.includes(t) ? 'checked' : '')}> ${t}</label>`)}</div>
   <h2>Chemicals added</h2>
-  <div class="card"><div id="chems">${(v.chemicals.length ? v.chemicals : []).map(chemRow)}</div>
+  <div class="card"><datalist id="prodlist">${window.__prods.map((p) => html`<option value="${p.name}">${p.unit} · ${money(p.price)}</option>`)}</datalist><div id="chems">${(v.chemicals.length ? v.chemicals : []).map(chemRow)}</div>
     <button type="button" class="btn sm" data-act="addChem">${icon('plus')} Add chemical</button> <span class="muted small">Charges are added to the invoice.</span></div>
   <h2>Notes &amp; billing</h2>
   <div class="card fields"><label class="full">Notes<textarea name="notes" rows="3" placeholder="Equipment issues, observations…">${v.notes}</textarea></label>
@@ -543,7 +545,7 @@ actions.saveVisit = async ({ status }, btn) => {
   const body = {
     status, ...collectReadings(f), notes: f.notes.value, tech_id: f.tech_id.value === '' ? null : Number(f.tech_id.value),
     tasks: [...f.querySelectorAll('[name=task]:checked')].map((c) => c.value),
-    chemicals: [...f.querySelectorAll('.chem')].map((r) => Object.fromEntries([...r.querySelectorAll('[data-c]')].map((i) => [i.dataset.c, i.dataset.c === 'name' || i.dataset.c === 'unit' ? i.value.trim() : i.value.trim() === '' ? '' : Number(i.value)]))).filter((c) => c.name),
+    chemicals: [...f.querySelectorAll('.chem')].map((r) => Object.fromEntries([...r.querySelectorAll('[data-c]')].map((i) => [i.dataset.c, i.dataset.c === 'name' || i.dataset.c === 'unit' ? i.value.trim() : i.value.trim() === '' ? '' : Number(i.value)]))).filter((c) => c.name).map((c) => { for (const k of ['product_id', 'cost']) if (c[k] === '' ) delete c[k]; return c; }),
   };
   if (!f.price.disabled) body.price = num(f.price.value) ?? 0;
   if (f.ph.disabled) for (const k of [...READINGS.map((r) => r[0]), 'price', 'status']) delete body[k]; // invoiced: only notes/tech editable

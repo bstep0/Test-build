@@ -26,11 +26,12 @@
   }
 
   // Nearest-neighbour construction + 2-opt improvement. Returns indices into `pts`.
-  function optimizeOrder(depot, pts, { roundTrip = true } = {}) {
+  // `matrix` (optional) is a (n+1)×(n+1) distance matrix in miles for [depot, ...pts], e.g. from a road-routing service.
+  function optimizeOrder(depot, pts, { roundTrip = true, matrix = null } = {}) {
     const n = pts.length;
     if (n < 3) return pts.map((_, i) => i);
     const nodes = [depot, ...pts];
-    const d = nodes.map((a) => nodes.map((b) => miles(a, b)));
+    const d = matrix || nodes.map((a) => nodes.map((b) => miles(a, b)));
     const cost = (o) => { let c = 0, prev = 0; for (const i of o) { c += d[prev][i]; prev = i; } return roundTrip ? c + d[prev][0] : c; };
     const left = new Set(pts.map((_, i) => i + 1)), order = [];
     for (let cur = 0; left.size;) {
@@ -57,8 +58,12 @@
     if (!start || located.length < 2) return { ordered: items.slice(), before: 0, after: 0, depotAssumed: !has(depot), missing: missing.length };
     const order = optimizeOrder(start, located, opts);
     const ordered = order.map((i) => located[i]);
-    const rt = opts.roundTrip !== false;
-    return { ordered: ordered.concat(missing), before: pathMiles(start, located, rt), after: pathMiles(start, ordered, rt), depotAssumed: !has(depot), missing: missing.length };
+    const rt = opts.roundTrip !== false, M = opts.matrix;
+    const along = (seq) => { // seq = indices into `located`; matrix path distance, else straight-line × road factor
+      if (!M) return pathMiles(start, seq.map((i) => located[i]), rt);
+      let d = 0, prev = 0; for (const i of seq) { d += M[prev][i + 1]; prev = i + 1; } return rt && seq.length ? d + M[prev][0] : d;
+    };
+    return { ordered: ordered.concat(missing), before: along(located.map((_, i) => i)), after: along(order), depotAssumed: !has(depot), missing: missing.length };
   }
 
   function stats(depot, items, { roundTrip = true, speed = 25, serviceMin = 25 } = {}) {

@@ -102,11 +102,11 @@ function buildNav() {
   buildTopbar();
   if (localStorage.getItem('navCollapsed') === '1') document.body.classList.add('collapsed');
 }
-window.NAV_SECTIONS = () => [
+window.NAV_SECTIONS = () => (me?.role === 'office' ? (x) => x.map(([s, items]) => [s, items.filter(([k]) => k !== 'settings')]) : (x) => x)([
   ['Operations', [['dashboard', 'Dashboard', 'grid'], ['route', 'Daily route', 'route'], ['builder', 'Route builder', 'columns']]],
   ['Business', [['customers', 'Customers', 'users'], ['quotes', 'Quotes', 'file'], ['workorders', 'Work orders', 'wrench'], ['invoices', 'Invoices', 'dollar'], ['inventory', 'Inventory', 'box'], ['reports', 'Reports', 'trend']]],
   ['Tools', [['dose', 'Dosing', 'drop'], ['team', 'Team', 'badge'], ['settings', 'Settings', 'sliders'], ['account', 'Account', 'user']]],
-];
+]);
 Object.assign(ICONS, {
   box: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5M12 13v8"/>', user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/>',

@@ -1,6 +1,6 @@
 /* SplashDesk service worker: app shell works offline; field data is served from the last good response. */
-const SHELL = 'sd-shell-v2', API = 'sd-api';
-const CORE = ['/', '/style.css', '/app.js', '/ui.js', '/theme.js', '/features.js', '/boot.js', '/dosing.js', '/geo.js', '/manifest.webmanifest', '/icon-192.png'];
+const SHELL = 'sd-shell-v3', API = 'sd-api';
+const CORE = ['/', '/style.css', '/app.js', '/ui.js', '/theme.js', '/features.js', '/features2.js', '/boot.js', '/dosing.js', '/geo.js', '/manifest.webmanifest', '/icon-192.png'];
 const API_CACHEABLE = /^\/api\/(day\/[\d-]+|visits\/\d+|settings|techs|products|pool-history\/\d+|auth\/me|visits\/\d+\/photos)$/;
 
 self.addEventListener('install', (e) => {
