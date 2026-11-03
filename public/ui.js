@@ -88,7 +88,7 @@ function confetti(x = innerWidth / 2, y = innerHeight / 2) {
 }
 
 // ───────── shell: sidebar + topbar ─────────
-const PAGE_TITLES = { dashboard: 'Dashboard', route: 'Daily route', visit: 'Visit', builder: 'Route builder', customers: 'Customers', workorders: 'Work orders', invoices: 'Invoices',
+const PAGE_TITLES = { outbox: 'Outbox', dashboard: 'Dashboard', route: 'Daily route', visit: 'Visit', builder: 'Route builder', customers: 'Customers', workorders: 'Work orders', invoices: 'Invoices',
   quotes: 'Quotes', inventory: 'Inventory', reports: 'Reports', dose: 'Dosing', team: 'Team', settings: 'Settings', account: 'Account' };
 const BADGES = { invoices: 'invoices_overdue', workorders: 'work_orders_open', quotes: 'quotes_waiting', inventory: 'low_stock' };
 function buildNav() {
@@ -105,7 +105,7 @@ function buildNav() {
 window.NAV_SECTIONS = () => (me?.role === 'office' ? (x) => x.map(([s, items]) => [s, items.filter(([k]) => k !== 'settings')]) : (x) => x)([
   ['Operations', [['dashboard', 'Dashboard', 'grid'], ['route', 'Daily route', 'route'], ['builder', 'Route builder', 'columns']]],
   ['Business', [['customers', 'Customers', 'users'], ['quotes', 'Quotes', 'file'], ['workorders', 'Work orders', 'wrench'], ['invoices', 'Invoices', 'dollar'], ['inventory', 'Inventory', 'box'], ['reports', 'Reports', 'trend']]],
-  ['Tools', [['dose', 'Dosing', 'drop'], ['team', 'Team', 'badge'], ['settings', 'Settings', 'sliders'], ['account', 'Account', 'user']]],
+  ['Tools', [['dose', 'Dosing', 'drop'], ['team', 'Team', 'badge'], ['outbox', 'Outbox', 'mail'], ['settings', 'Settings', 'sliders'], ['account', 'Account', 'user']]],
 ]);
 Object.assign(ICONS, {
   box: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5M12 13v8"/>', user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',

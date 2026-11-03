@@ -284,6 +284,8 @@ function createApp(db, opts = {}) {
     const inv = one(`SELECT i.*, c.name AS customer_name, c.address, c.city, c.email, c.autopay FROM invoices i JOIN customers c ON c.id=i.customer_id WHERE i.id=?`, id);
     if (!inv) throw notFound();
     parseJson(inv, ['items']);
+    if (!inv.token) { inv.token = crypto.randomBytes(16).toString('hex'); run('UPDATE invoices SET token=? WHERE id=?', inv.token, inv.id); }   // invoices created before pay links existed
+    if (!inv.subtotal) inv.subtotal = inv.total;
     if (req && inv.token) inv.pay_url = `${baseUrl(req)}/pay/${inv.token}`;
     return inv;
   };
@@ -579,7 +581,7 @@ function createApp(db, opts = {}) {
     fs.createReadStream(file).pipe(res);
   }
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
       if (url.pathname === '/healthz') { db.prepare('SELECT 1').get(); res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
@@ -596,6 +598,8 @@ function createApp(db, opts = {}) {
       if (!res.headersSent) send(res, e.status, { error: e.message }, { headers: e.headers || {} }); else res.end();
     }
   });
+  server.ctx = ctx;
+  return server;
 }
 
 module.exports = { createApp };
@@ -610,5 +614,8 @@ if (require.main === module) {
   if (!process.env.NO_BACKUPS) require('./lib/ops').scheduleBackups(db, process.env.BACKUP_DIR || path.join(path.dirname(dbFile), 'backups'));
   const port = Number(process.env.PORT) || 3000;
   const host = process.env.HOST || '127.0.0.1';
-  createApp(db).listen(port, host, () => console.log(`SplashDesk running at http://${host}:${port}`));
+  const server = createApp(db);
+  server.listen(port, host, () => console.log(`SplashDesk running at http://${host}:${port}`));
+  const reminders = setInterval(() => { try { server.ctx.runReminders(); } catch (e) { console.error('Reminder job failed:', e.message); } }, 6 * 3600 * 1000);
+  reminders.unref();
 }

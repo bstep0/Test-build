@@ -1,44 +1,69 @@
 # SplashDesk
 
-Pool service management software in the spirit of Skimmer, Pool Brain and GoSplash.
-Zero npm dependencies: Node 22.13+ (built-in `node:sqlite` + `http`) and a vanilla-JS front end.
+Pool-service management software in the spirit of Skimmer, Pool Brain and GoSplash: routes, mobile visit logging with
+water-chemistry dosing, invoicing and card payments, customer portal, and reports.
+**Zero npm dependencies** — Node 22.13+ (built-in `node:sqlite` and `http`) and a vanilla-JS front end.
 
 ## Run it
 
 ```bash
-npm run demo     # starts on http://127.0.0.1:3000 with sample customers, routes and history
-npm start        # same, but with an empty database (data/splashdesk.db)
-npm test         # API + dosing tests
+npm run demo     # http://127.0.0.1:3000 with sample data. Logins (password demo1234):
+                 #   owner@demo.test · office@demo.test · tech@demo.test
+npm start        # empty database; the first visit creates your owner account
+npm test         # 26 API/logic tests
 ```
 
-Env vars: `PORT` (3000), `HOST` (127.0.0.1), `DB_PATH` (data/splashdesk.db).
+## What's in it
 
-## Features
-
-| Area | What it does |
+| Area | Highlights |
 |---|---|
-| **Customers & pools** | Contact info, gate codes, access notes, per-visit rate; multiple pools per customer with volume, surface, sanitizer and equipment notes |
-| **Routes** | Recurring stops by weekday (weekly / every 2–4 weeks) assigned to technicians; daily route view per tech with a route map, drive-time/mileage estimates, reordering, one-off stops and navigation links |
-| **Route builder** | Weekly board: drag unscheduled pools onto days, drag stops between days/reorder, per-day mileage & time, weekly revenue. Mobile-friendly ▲▼ / ⋯ controls as an alternative to dragging |
-| **Route optimizer** | Nearest-neighbour + 2-opt per technician per day, starting/ending at your shop. Preview shows miles & time saved before you apply. Works on a single day, the recurring weekday template, or all days at once |
-| **Tech visit screen** (mobile-friendly) | Log FC, pH, TA, CYA, CH, salt, temp; task checklist; chemicals used (with optional charge); notes; complete or skip. Shows last visit's readings |
-| **Dosing** | Live in-range check and chemical amounts (liquid chlorine, acid, soda ash, baking soda, stabilizer, calcium, salt, partial-drain %) scaled to pool volume. Also a standalone calculator |
-| **Work orders** | Repairs with price, due date, tech, status; completed ones flow to billing |
-| **Invoicing** | One click bundles unbilled completed visits, chemical charges and finished work orders; record payment, print/PDF, email link, void |
-| **Dashboard** | Today's progress by tech, open work orders, outstanding/overdue/collected, and pools whose latest test is out of range |
+| **Accounts & roles** | Owner / office / technician. Technicians see only their own route and visits (enforced server-side). scrypt passwords, hashed sessions, login throttling, CSRF origin check, CSP, audit log, daily backups, customer archiving instead of deletion |
+| **Routes** | Recurring weekly/bi-weekly stops, seasonal end dates, holidays, **drag-and-drop route builder**, **optimizer** (nearest-neighbour + 2-opt, preview savings before applying, optional real road distances via OSRM), reassign a day when a tech is out, reschedule a visit, route maps (schematic + optional street map) |
+| **Field app (PWA)** | Installable, works offline: visits and photos queue on the device and sync on reconnect. Range gauges, live dosing, "I've arrived", "On my way" text, photos with client-side resize |
+| **Dosing** | Chemical amounts scaled to pool volume; chlorine target scales with stabilizer (CYA); Langelier saturation index; partial-drain guidance |
+| **Billing** | Per-visit or flat monthly pricing, chemical charges, repairs, sales tax, payment terms, Stripe card payments from a public pay link, saved-card autopay, QuickBooks-friendly CSV exports |
+| **Quotes** | Send an estimate link; customer approves/declines online; approval creates a work order |
+| **Inventory** | Products with stock, cost and price; stock is deducted when visits complete; low-stock alerts; chemical margin reporting |
+| **Customer portal** | Private link: upcoming visits, latest water test, photos, invoices (pay now), quotes, service requests |
+| **Messaging** | Service reports, invoice emails, ETA texts, weekly overdue reminders; everything recorded in an Outbox |
+| **Reports** | Revenue, receivables aging, technician quality/revenue, route profitability (revenue per hour), chemical usage and margin, top customers |
+| **Design** | Responsive "deep ocean" design system: command palette (Ctrl/⌘K), dark mode, animated charts and route lines, skeleton loading, micro-interactions |
+
+## Deploy
+
+One deployment per company. Persist the `/data` volume (SQLite database, photos, backups).
+
+```bash
+docker compose up -d --build        # or: render.yaml (Render) / fly.toml (Fly.io)
+```
+
+Set `PUBLIC_URL` (used in emails, pay links and the portal) and `COOKIE_SECURE=1` behind HTTPS. See `.env.example`.
+
+| Variable | Purpose |
+|---|---|
+| `PUBLIC_URL`, `COOKIE_SECURE` | Links in messages; secure cookies |
+| `DB_PATH`, `PHOTO_DIR`, `BACKUP_DIR` | Storage locations (default `./data`) |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Card payments. Add `https://YOUR-URL/api/stripe/webhook` in Stripe for `checkout.session.completed` |
+| `RESEND_API_KEY`, `EMAIL_FROM` | Email delivery |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM` | SMS delivery |
+
+Without Stripe/Resend/Twilio keys the app still works: online payment is disabled and messages are logged in the Outbox.
+
+## Honest limits
+
+- **Integrations are tested against mocks, not live services.** Stripe, Resend, Twilio, OSRM routing and the street-map
+  tiles need your real accounts/keys and a quick end-to-end check before you rely on them.
+- **Single company per deployment** (no multi-tenant SaaS layer), and a **web app, not native iOS/Android** (it installs
+  to the home screen and works offline, but has no push notifications or background sync on iOS).
+- No live QuickBooks sync — use the CSV exports. Routing is distance-based (no live traffic or time windows).
+- Dosing amounts are standard rules of thumb to guide a technician, not a substitute for judgement.
+- Geocoding/lookups use OpenStreetMap's free service only when you click a lookup button.
 
 ## Layout
 
 ```
-server.js        HTTP server + JSON API (routes, validation, invoicing, optimiser endpoint)
-lib/db.js        SQLite schema      lib/schedule.js  recurring-stop → visit generation
-public/          SPA (index.html, app.js, style.css) + dosing.js / geo.js (shared with server)
-seed.js          demo data          test/            node:test suite
+server.js         HTTP server, core API (customers, routes, visits, invoices, optimizer, dashboard)
+lib/              auth, ops (audit/backup), payments, quotes, inventory, exports, notify, photos, portal, scheduling, reports
+public/           SPA (app.js, ui.js, features*.js), customer pages (public.js), dosing.js + geo.js (shared with the server)
+seed.js           demo data         test/      node:test suite
 ```
-
-## Known limits / next steps
-
-- **No authentication.** It binds to localhost by default; put it behind a login/reverse proxy before exposing it. Next step: user accounts with tech vs. admin roles.
-- Dosing uses standard rule-of-thumb factors (per 10k gal) — a guide, not a substitute for technician judgement.
-- Route optimisation needs map locations: enter lat/lng on a customer, or use the *Look up* / *Locate missing customers* buttons (these send addresses to OpenStreetMap's Nominatim service; nothing is sent unless you click). Distances are straight-line × 1.3, not live traffic, and the route map is schematic (no map tiles).
-- Not yet built: online payments (Stripe), customer portal, SMS/email notifications, photo uploads, turn-by-turn/traffic-aware routing, offline mode, recurring/monthly billing.

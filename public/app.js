@@ -278,8 +278,9 @@ views.route = async () => {
   const depot = depotOf(st), done = stops.filter((s) => s.status !== 'scheduled').length;
   const groups = groupByTech(stops), tot = sumStats(groups, depot, st);
   const mapGroups = groups.map((g) => ({ color: g.color, name: g.name, stops: g.stops.map((s, i) => ({ lat: s.lat, lng: s.lng, label: i + 1, title: s.customer_name })) }));
+  window.__routeMap = { depot, mapGroups, roundTrip: !!st.round_trip, svg: null };
   return html`${pageHead('Daily route', fmtDate(routeDate, { weekday: 'long', month: 'long', day: 'numeric' }) + ` · ${done} of ${stops.length} stops complete`,
-    html`<button class="btn staff-only" data-act="optDay" ${raw(stops.length < 2 ? 'disabled' : '')}>${icon('zap')} Optimize</button><button class="btn primary staff-only" data-act="addStop">${icon('plus')} One-off stop</button>`)}
+    html`<button class="btn staff-only" data-act="reassignDay">${icon('users')} Reassign day</button><button class="btn staff-only" data-act="optDay" ${raw(stops.length < 2 ? 'disabled' : '')}>${icon('zap')} Optimize</button><button class="btn primary staff-only" data-act="addStop">${icon('plus')} One-off stop</button>`)}
   <div class="row noprint" style="margin-bottom:6px">
     <button class="btn icon" data-act="day" data-d="-1" aria-label="Previous day">‹</button>
     <input type="date" value="${routeDate}" style="width:auto" data-live="routeDate">
@@ -298,8 +299,8 @@ views.route = async () => {
           <a class="btn sm icon" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(s.address + ', ' + s.city)}" title="Navigate" aria-label="Navigate">${icon('pin')}</a>
           <button class="btn sm icon staff-only" data-act="move" data-id="${s.id}" data-dir="-1" ${raw(i === 0 ? 'disabled' : '')} aria-label="Move up">↑</button>
           <button class="btn sm icon staff-only" data-act="move" data-id="${s.id}" data-dir="1" ${raw(i === g.stops.length - 1 ? 'disabled' : '')} aria-label="Move down">↓</button></span></div>`)}`; })}</div>
-    <div class="card" style="position:sticky;top:16px"><div class="row spread" style="margin-bottom:12px"><h3>Route map</h3><span class="muted small">${fmtMi(tot.miles)} · ${fmtMin(tot.min)} total</span></div>
-      ${mapSvg(depot, mapGroups, { roundTrip: !!st.round_trip })}${legend(groups, depot, st)}</div></div>`
+    <div class="card" style="position:sticky;top:16px"><div class="row spread" style="margin-bottom:12px"><h3>Route map</h3><span class="row" style="gap:8px"><span class="muted small">${fmtMi(tot.miles)} · ${fmtMin(tot.min)} total</span><button class="btn sm" id="mapToggle" data-act="streetMap">Street map</button></span></div>
+      <div id="mapbox">${mapSvg(depot, mapGroups, { roundTrip: !!st.round_trip })}</div>${legend(groups, depot, st)}</div></div>`
     : html`<div class="card empty mt">Nothing scheduled for this day.</div>`}`;
 };
 actions.move = async ({ id, dir }) => {
@@ -485,7 +486,7 @@ const chemRow = (c = {}) => html`<div class="chem"><input placeholder="Chemical"
   <input placeholder="Unit" data-c="unit" value="${c.unit}"><input placeholder="$ charge" inputmode="decimal" data-c="charge" value="${c.charge}"><button type="button" class="btn sm" data-act="rmChem" aria-label="Remove">✕</button>
   <input type="hidden" data-c="product_id" value="${c.product_id}"><input type="hidden" data-c="cost" value="${c.cost}"></div>`;
 const findingsHtml = (volume, r) => {
-  const list = Dosing.analyze(volume, r);
+  const list = Dosing.analyze(volume, r, { lsi: true });
   if (!list.length) return html`<p class="muted small">Enter readings to see dosing guidance.</p>`;
   return html`${list.map((f) => html`<div class="finding"><span class="badge ${f.status === 'ok' ? 'ok' : f.status === 'low' ? 'warn' : 'bad'}">${f.status.toUpperCase()}</span>
     <span><b>${f.label}</b> ${f.value}${f.unit ? ' ' + f.unit : ''}<br><span class="muted small">${f.message}</span></span>
@@ -495,7 +496,7 @@ const findingsHtml = (volume, r) => {
 const collectReadings = (root) => Object.fromEntries(READINGS.map(([k]) => [k, num($(`[name=${k}]`, root)?.value)]));
 
 views.visit = async (id) => {
-  const [v, ts, prods] = await Promise.all([GET('/visits/' + id), techs(), GET('/products').catch(() => [])]);
+  const [v, ts, prods, photos] = await Promise.all([GET('/visits/' + id), techs(), GET('/products').catch(() => []), GET(`/visits/${id}/photos`).catch(() => [])]);
   window.__prods = prods.filter((p) => p.active);
   const locked = !!v.invoice_id, prev = v.previous;
   const lastOf = (k) => (prev && prev[k] != null ? `last visit: ${prev[k]}` : '');
@@ -509,7 +510,7 @@ views.visit = async (id) => {
   <div class="card small">
     <div class="row" style="gap:14px"><span>${icon('pin')} <a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(v.address + ', ' + v.city)}">${v.address}, ${v.city}</a></span>
       ${v.phone ? html`<span>${icon('phone')} <a href="tel:${v.phone}">${v.phone}</a></span>` : ''} ${v.gate_code ? html`<span class="chip">Gate ${v.gate_code}</span>` : ''}
-      ${v.status === 'scheduled' && !v.arrived_at && !locked ? html`<button type="button" class="btn sm primary" style="margin-left:auto" data-act="arrive" data-id="${v.id}">I've arrived</button>` : ''}</div>
+      ${v.status === 'scheduled' && !locked ? html`<span class="row" style="margin-left:auto;gap:6px"><button type="button" class="btn sm" data-act="sendEta" data-id="${v.id}">${icon('send')} On my way</button>${!v.arrived_at ? html`<button type="button" class="btn sm primary" data-act="arrive" data-id="${v.id}">I've arrived</button>` : ''}</span>` : ''}</div>
     ${v.customer_notes ? html`<div class="mt">⚠️ ${v.customer_notes}</div>` : ''}${v.pool_notes ? html`<div>🔧 ${v.pool_notes}</div>` : ''}</div>
   <form id="vform" data-id="${v.id}" data-volume="${v.volume_gal}">
   <h2>Water chemistry</h2>
@@ -521,6 +522,7 @@ views.visit = async (id) => {
   <h2>Chemicals added</h2>
   <div class="card"><datalist id="prodlist">${window.__prods.map((p) => html`<option value="${p.name}">${p.unit} · ${money(p.price)}</option>`)}</datalist><div id="chems">${(v.chemicals.length ? v.chemicals : []).map(chemRow)}</div>
     <button type="button" class="btn sm" data-act="addChem">${icon('plus')} Add chemical</button> <span class="muted small">Charges are added to the invoice.</span></div>
+  ${photoSection(v, photos)}
   <h2>Notes &amp; billing</h2>
   <div class="card fields"><label class="full">Notes<textarea name="notes" rows="3" placeholder="Equipment issues, observations…">${v.notes}</textarea></label>
     <label class="staff-only">Technician<select name="tech_id">${techOptions(ts).map(([k, l]) => html`<option value="${k}" ${raw(String(k) === String(v.tech_id ?? '') ? 'selected' : '')}>${l}</option>`)}</select></label>
@@ -528,7 +530,7 @@ views.visit = async (id) => {
   <div class="actionbar noprint"><div class="row">
     ${v.status === 'done' ? html`<button type="button" class="btn big primary" data-act="saveVisit" data-status="done">Save changes</button><button type="button" class="btn big" data-act="saveVisit" data-status="scheduled" ${raw(locked ? 'disabled' : '')}>Re-open</button>`
       : html`<button type="button" class="btn big primary" data-act="saveVisit" data-status="done">${icon('check')} Complete visit</button><button type="button" class="btn big" data-act="saveVisit" data-status="scheduled">Save draft</button><button type="button" class="btn big" data-act="saveVisit" data-status="skipped">Skip</button>`}
-    <span class="grow"></span><button type="button" class="btn danger staff-only" data-act="delVisit" data-id="${v.id}" ${raw(locked ? 'disabled' : '')}>Delete</button></div></div></form>
+    <span class="grow"></span>${v.status === 'scheduled' && !locked ? html`<button type="button" class="btn staff-only" data-act="reschedule" data-id="${v.id}" data-date="${v.date}">${icon('clock')} Reschedule</button>` : ''}<button type="button" class="btn danger staff-only" data-act="delVisit" data-id="${v.id}" ${raw(locked ? 'disabled' : '')}>Delete</button></div></div></form>
   <div class="row small muted mt noprint">Need a repair? <a href="#" data-act="newWO" data-pool="${v.pool_id}">Create a work order for this pool</a></div>`;
 };
 actions.arrive = async ({ id }) => { await PUT('/visits/' + id, { arrived_at: new Date().toISOString() }); toast('Arrival recorded'); render(); };
@@ -593,7 +595,7 @@ actions.editPool = async ({ id }) => openForm({ title: 'Edit pool', fields: POOL
 const stopFields = (ts) => [
   { name: 'weekday', label: 'Day of week', type: 'select', int: true, options: WEEKDAYS.map((d, i) => [i, d]) },
   { name: 'frequency', label: 'Repeats', type: 'select', int: true, options: [[1, 'Every week'], [2, 'Every 2 weeks'], [3, 'Every 3 weeks'], [4, 'Every 4 weeks']] },
-  { name: 'tech_id', label: 'Technician', type: 'select', int: true, options: techOptions(ts) }, { name: 'start_date', label: 'Starting', type: 'date', required: true },
+  { name: 'tech_id', label: 'Technician', type: 'select', int: true, options: techOptions(ts) }, { name: 'start_date', label: 'Starting', type: 'date', required: true }, { name: 'end_date', label: 'Ends (optional — seasonal service)', type: 'date', nullable: true },
   { name: 'active', label: 'Active', type: 'checkbox' },
 ];
 actions.newStop = async ({ pool }) => openForm({ title: 'Add to route', fields: stopFields(await techs()), values: { weekday: new Date().getDay() || 1, frequency: 1, active: 1, start_date: localISO() }, onSave: (d) => POST('/stops', { ...d, pool_id: Number(pool) }) });
@@ -612,7 +614,7 @@ views.customers = async (id) => {
       <div class="row" style="gap:16px;align-items:flex-end;flex-wrap:nowrap"><div style="border:4px solid var(--card);border-radius:50%;display:flex">${avatar(c.name, 72)}</div>
         <div style="padding-bottom:4px"><h1 style="font-size:23px">${c.name}</h1><div class="muted small">${c.address}${c.city ? ', ' + c.city : ''}</div></div></div>
       <div class="row">${c.phone ? html`<a class="btn sm" href="tel:${c.phone}">${icon('phone')} Call</a>` : ''}${c.email ? html`<a class="btn sm" href="mailto:${c.email}">${icon('mail')} Email</a>` : ''}
-        <button class="btn sm" data-act="editCustomer" data-id="${c.id}">${icon('edit')} Edit</button></div></div></div>
+        <button class="btn sm" data-act="portalLink" data-id="${c.id}">${icon('send')} Portal link</button><button class="btn sm" data-act="editCustomer" data-id="${c.id}">${icon('edit')} Edit</button></div></div></div>
   <div class="grid mt stagger">
     <div class="card kpi"><div class="ico">${icon('drop')}</div><div><div class="n">${histPools}</div><div class="l">Pool${histPools === 1 ? '' : 's'}</div></div></div>
     <div class="card kpi ok"><div class="ico">${icon('dollar')}</div><div><div class="n">${c.billing_mode === 'monthly' ? money(c.monthly_rate) : money(c.rate)}</div><div class="l">${c.billing_mode === 'monthly' ? 'per month' : 'per visit'}</div></div></div>

@@ -64,6 +64,30 @@ async function quotePage(token) {
   document.getElementById('no')?.addEventListener('click', () => respond('decline'));
 }
 
+window.portalPage = async (token) => {
+  const d = await api('GET', `/portal/${token}`);
+  const chip = (f) => `<span class="badge ${f.status === 'ok' ? 'ok' : f.status === 'low' ? 'warn' : 'bad'}">${esc(f.label.replace('Total ', '').replace(' (CYA)', ''))} ${f.value}${f.unit ? ' ' + esc(f.unit) : ''}</span>`;
+  const poolCard = (p) => `<div class="card" style="margin-bottom:14px"><div class="row spread"><div><b style="font-size:16px">${esc(p.name)}</b><div class="muted small">${esc(p.type)} · ${(p.volume_gal || 0).toLocaleString()} gal</div></div>
+      ${p.next.length ? `<div class="right small"><span class="muted">Next visit</span><br><b>${fmtDate(p.next[0])}</b></div>` : ''}</div>
+    ${p.last ? `<div class="mt"><div class="muted small" style="font-weight:700;letter-spacing:.06em;text-transform:uppercase">Latest water test · ${fmtDate(p.last.date)}</div><div class="row mt" style="gap:6px">${p.last.findings.map(chip).join('')}</div>${p.last.notes ? `<p class="small muted">${esc(p.last.notes)}</p>` : ''}</div>` : '<p class="muted small">No visits yet.</p>'}
+    ${p.photos.length ? `<div class="photos mt">${p.photos.map((x) => `<div class="thumb"><a href="${x.url}" target="_blank" rel="noopener"><img src="${x.url}" alt="${esc(x.caption || 'Service photo')}" loading="lazy"></a></div>`).join('')}</div>` : ''}
+    ${p.next.length > 1 ? `<div class="muted small mt">Upcoming: ${p.next.map(fmtDate).join(' · ')}</div>` : ''}</div>`;
+  const open = d.invoices.filter((i) => i.status === 'open');
+  root.innerHTML = shell(d.company, `Hi ${esc(d.customer.name.split(/[ ,]/)[0])} 👋`, 'Your pool service at a glance',
+    `${d.pools.map(poolCard).join('')}
+    ${d.quotes.length ? `<div class="card" style="margin-bottom:14px"><b>Quotes waiting for you</b>${d.quotes.map((q) => `<div class="row spread mt"><span>${esc(q.title)} · <b>${money(q.total)}</b></span><a class="btn sm primary" href="${q.url}">Review</a></div>`).join('')}</div>` : ''}
+    <div class="card flush" style="margin-bottom:14px"><div class="card-head"><h3>Invoices</h3>${open.length ? `<span class="badge warn">${open.length} unpaid</span>` : '<span class="badge ok">All paid</span>'}</div>
+      ${d.invoices.length ? `<table><tbody>${d.invoices.map((i) => `<tr><td><b>#${i.id}</b><div class="muted small">${fmtDate(i.issued)}</div></td><td>${money(i.total)}</td><td>${i.status === 'paid' ? '<span class="badge ok">paid</span>' : `<a class="btn sm primary" href="${i.pay_url}">Pay now</a>`}</td></tr>`).join('')}</tbody></table>` : '<p class="muted" style="padding:16px 20px;margin:0">No invoices yet.</p>'}</div>
+    ${d.history.length ? `<div class="card flush" style="margin-bottom:14px"><div class="card-head"><h3>Recent visits</h3></div><table><tbody>${d.history.map((v) => `<tr><td>${fmtDate(v.date)}</td><td>${esc(v.pool_name)}</td><td class="muted small">${esc((v.tasks || []).slice(0, 3).join(', '))}</td></tr>`).join('')}</tbody></table></div>` : ''}
+    <div class="card"><h3>Need something?</h3><p class="muted small" style="margin-top:4px">Tell us about a problem or a request and we'll get back to you.</p>
+      <textarea id="msg" rows="3" placeholder="e.g. The pump is making a loud noise"></textarea><div class="row mt"><button class="btn primary" id="send">Send request</button><span class="small" id="sent"></span></div></div>`);
+  document.getElementById('send').addEventListener('click', async (e) => {
+    const box = document.getElementById('msg'), out = document.getElementById('sent');
+    try { await api('POST', `/portal/${token}/request`, { message: box.value }); box.value = ''; out.style.color = 'var(--ok)'; out.textContent = 'Sent — thank you! We’ll be in touch.'; }
+    catch (x) { out.style.color = 'var(--bad)'; out.textContent = x.message; }
+  });
+};
+
 const [, kind, token] = location.pathname.split('/');
 (async () => {
   try {

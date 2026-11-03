@@ -36,15 +36,21 @@ function seed(db, today = new Date()) {
   const put = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
   put.run('depot_name', JSON.stringify('Shop')); put.run('depot_address', JSON.stringify('Sunnyvale, CA'));
   put.run('depot_lat', JSON.stringify(37.3688)); put.run('depot_lng', JSON.stringify(-122.0363));
+  put.run('company_name', JSON.stringify('Crystal Clear Pool Co.')); put.run('company_email', JSON.stringify('service@crystalclear.example'));
+  put.run('company_phone', JSON.stringify('(408) 555-0142')); put.run('tax_rate', JSON.stringify(8.25));
+  put.run('invoice_footer', JSON.stringify('Thank you for choosing Crystal Clear! Pay online with the link above, or by check within 14 days.'));
+  const products = [['Liquid chlorine 10%', 'gal', 3.2, 8.5, 42, 15], ['Muriatic acid', 'gal', 6.5, 14, 18, 6], ['Stabilizer (CYA)', 'lb', 4.1, 9.5, 60, 20], ['Pool salt 40 lb', 'bag', 6.8, 14, 9, 10], ['Baking soda', 'lb', 0.9, 3, 80, 25]]
+    .map(([n, u, c, p, st, low]) => ({ name: n, unit: u, cost: c, price: p, id: Number(db.prepare('INSERT INTO products (name, unit, cost, price, stock, low_stock) VALUES (?,?,?,?,?,?)').run(n, u, c, p, st, low).lastInsertRowid) }));
   const start = new Date(today); start.setUTCDate(start.getUTCDate() - 28);
   const startDate = iso(start);
 
   people.forEach(([name, address, city, rate], i) => {
     const slug = name.toLowerCase().replace(/[^a-z]+/g, '.').replace(/^\.|\.$/g, '');
     const [lat, lng] = jitter(city);
-    const c = ins('INSERT INTO customers (name, phone, email, address, city, gate_code, notes, rate, lat, lng) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    const c = ins('INSERT INTO customers (name, phone, email, address, city, gate_code, notes, rate, lat, lng, billing_mode, monthly_rate, notify_sms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
       name, `555-02${String(10 + i).padStart(2, '0')}`, `${slug}@example.com`, address, city,
-      i % 3 === 0 ? String(1000 + i * 37) : '', i % 4 === 1 ? 'Dog in backyard — text before arriving.' : '', rate, lat, lng);
+      i % 3 === 0 ? String(1000 + i * 37) : '', i % 4 === 1 ? 'Dog in backyard — text before arriving.' : '', rate, lat, lng,
+      i % 7 === 3 ? 'monthly' : 'visit', i % 7 === 3 ? Math.round(rate * 4.1) : 0, i % 2);
     const p = ins('INSERT INTO pools (customer_id, name, type, volume_gal, surface, sanitizer, notes) VALUES (?,?,?,?,?,?,?)',
       c, i % 5 === 4 ? 'Lap pool' : 'Pool', i % 5 === 2 ? 'Pool & spa' : 'Pool', between(10000, 30000, 1000),
       pick(['Plaster', 'Pebble', 'Vinyl', 'Fiberglass']), i % 3 === 0 ? 'Salt' : 'Chlorine',
@@ -72,6 +78,10 @@ function seed(db, today = new Date()) {
       done.run(t, t, between(1, 5.5, 0.5), between(7.0, 8.0, 0.1), between(60, 130, 5), between(25, 70, 5),
         between(180, 420, 10), v.sanitizer === 'Salt' ? between(2600, 3500, 100) : null, between(68, 86),
         JSON.stringify(['Skim surface', 'Brush walls & steps', 'Empty baskets', 'Test water']), '', v.id);
+      if (rand() < 0.4) {                       // chemicals used (billed + costed)
+        const pr = pick(products), qty = pr.unit === 'gal' ? between(0.5, 2, 0.5) : between(1, 4, 1);
+        db.prepare('UPDATE visits SET chemicals=?, cost=? WHERE id=?').run(JSON.stringify([{ product_id: pr.id, name: pr.name, qty, unit: pr.unit, charge: +(qty * pr.price).toFixed(2), cost: pr.cost }]), +(qty * pr.cost).toFixed(2), v.id);
+      }
     }
   }
 
@@ -95,6 +105,13 @@ function seed(db, today = new Date()) {
     for (const v of visits) db.prepare('UPDATE visits SET invoice_id=? WHERE id=?').run(id, v.id);
   };
   bill(1, 'paid'); bill(2, 'open'); bill(5, 'open');
+  const crypto = require('node:crypto');
+  const quote = (cust, title, items, status) => ins('INSERT INTO quotes (customer_id, pool_id, token, title, note, items, total, status) VALUES (?,?,?,?,?,?,?,?)', cust, poolId(cust - 1), crypto.randomBytes(16).toString('hex'), title,
+    'Includes parts, labor and disposal of the old equipment. 1-year warranty on the new unit.', JSON.stringify(items), items.reduce((s, i) => s + i.qty * i.price, 0), status);
+  quote(8, 'Variable-speed pump upgrade', [{ desc: 'Variable-speed pump (1.5 HP)', qty: 1, price: 1080 }, { desc: 'Installation labor', qty: 3, price: 85 }], 'sent');
+  quote(9, 'Replace pool light (LED)', [{ desc: 'LED color light', qty: 1, price: 285 }, { desc: 'Labor', qty: 1, price: 140 }], 'approved');
+  quote(11, 'Resurface coping tile', [{ desc: 'Tile & grout, 24 ft', qty: 1, price: 920 }], 'draft');
+  db.prepare("UPDATE customers SET portal_token=? WHERE id=1").run(crypto.randomBytes(16).toString('hex'));
 }
 
 module.exports = { seed };
