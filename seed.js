@@ -1,5 +1,5 @@
 'use strict';
-// Demo data: 3 techs, 14 customers on weekly routes, 3 weeks of visit history, work orders, invoices.
+// Demo data: 3 techs, 42 customers (with map locations) on deliberately unoptimised weekly routes, 4 weeks of history, work orders, invoices.
 const { ensureVisits } = require('./lib/schedule');
 
 function rng(seed) { // deterministic PRNG so the demo looks the same every time
@@ -16,7 +16,7 @@ function seed(db, today = new Date()) {
   const techs = [['Maria Lopez', '#0ea5e9'], ['Dan Whitaker', '#f97316'], ['Priya Nair', '#22c55e']]
     .map(([n, c], i) => ins('INSERT INTO techs (name, phone, color) VALUES (?,?,?)', n, `555-010${i}`, c));
 
-  const people = [
+  const hand = [
     ['Harper Residence', '1204 Palm Ave', 'Sunnyvale', 135], ['The Okafor Family', '88 Cedar Ct', 'Sunnyvale', 120],
     ['Lindqvist, Erik', '9 Marlin Way', 'Sunnyvale', 140], ['Ramirez Household', '312 Orchard Ln', 'Cupertino', 125],
     ['Bayview HOA', '1 Bayview Dr', 'Cupertino', 260], ['Chen & Park', '47 Willow Creek Rd', 'Cupertino', 150],
@@ -25,20 +25,32 @@ function seed(db, today = new Date()) {
     ['Nguyen Residence', '1801 Sierra Vista', 'Mountain View', 135], ['Tanaka Household', '29 Laurel Ct', 'Mountain View', 125],
     ['Sullivan, Pat', '402 Hillcrest Blvd', 'Sunnyvale', 150], ['Delgado Family', '77 Meadowlark Ln', 'Cupertino', 130],
   ];
+  const surnames = ['Abernathy', 'Baptiste', 'Carver', 'Dhillon', 'Eriksen', 'Fontaine', 'Gallagher', 'Hoshino', 'Iyer', 'Jankowski', 'Kessler', 'Lombardi', 'Mbeki', 'Novak', "O'Neill", 'Petrov', 'Quintero', 'Rosenberg', 'Salazar', 'Thackeray', 'Underhill', 'Varga', 'Whitfield', 'Xu', 'Yamamoto', 'Zielinski', 'Brandt', 'Castellano'];
+  const streets = ['Oak', 'Maple', 'Juniper', 'Sycamore', 'Magnolia', 'Redwood', 'Aspen', 'Cypress', 'Hawthorn', 'Poplar'];
+  const kinds = ['Ct', 'Ln', 'Way', 'Dr', 'St', 'Pl'];
+  const cities = ['Sunnyvale', 'Cupertino', 'Los Altos', 'Mountain View'];
+  const people = hand.concat(surnames.map((n, i) => [`${n} Residence`, `${100 + Math.floor(rand() * 1800)} ${streets[i % 10]} ${kinds[i % 6]}`, cities[i % 4], between(115, 170, 5)]));
+  // approximate city centres so the demo map looks plausible
+  const centre = { Sunnyvale: [37.3688, -122.0363], Cupertino: [37.323, -122.0322], 'Los Altos': [37.3852, -122.1141], 'Mountain View': [37.3861, -122.0839] };
+  const jitter = (c) => [centre[c][0] + (rand() - 0.5) * 0.045, centre[c][1] + (rand() - 0.5) * 0.06];
+  const put = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+  put.run('depot_name', JSON.stringify('Shop')); put.run('depot_address', JSON.stringify('Sunnyvale, CA'));
+  put.run('depot_lat', JSON.stringify(37.3688)); put.run('depot_lng', JSON.stringify(-122.0363));
   const start = new Date(today); start.setUTCDate(start.getUTCDate() - 28);
   const startDate = iso(start);
 
   people.forEach(([name, address, city, rate], i) => {
     const slug = name.toLowerCase().replace(/[^a-z]+/g, '.').replace(/^\.|\.$/g, '');
-    const c = ins('INSERT INTO customers (name, phone, email, address, city, gate_code, notes, rate) VALUES (?,?,?,?,?,?,?,?)',
+    const [lat, lng] = jitter(city);
+    const c = ins('INSERT INTO customers (name, phone, email, address, city, gate_code, notes, rate, lat, lng) VALUES (?,?,?,?,?,?,?,?,?,?)',
       name, `555-02${String(10 + i).padStart(2, '0')}`, `${slug}@example.com`, address, city,
-      i % 3 === 0 ? String(1000 + i * 37) : '', i % 4 === 1 ? 'Dog in backyard — text before arriving.' : '', rate);
+      i % 3 === 0 ? String(1000 + i * 37) : '', i % 4 === 1 ? 'Dog in backyard — text before arriving.' : '', rate, lat, lng);
     const p = ins('INSERT INTO pools (customer_id, name, type, volume_gal, surface, sanitizer, notes) VALUES (?,?,?,?,?,?,?)',
       c, i % 5 === 4 ? 'Lap pool' : 'Pool', i % 5 === 2 ? 'Pool & spa' : 'Pool', between(10000, 30000, 1000),
       pick(['Plaster', 'Pebble', 'Vinyl', 'Fiberglass']), i % 3 === 0 ? 'Salt' : 'Chlorine',
       i % 3 === 0 ? 'Salt cell — inspect every month.' : '');
     ins('INSERT INTO stops (pool_id, tech_id, weekday, frequency, position, start_date) VALUES (?,?,?,?,?,?)',
-      p, techs[i % 3], (i % 5) + 1, i === 13 ? 2 : 1, 10 + Math.floor(i / 5) * 10, startDate);
+      p, techs[Math.floor(rand() * 3)], 1 + Math.floor(rand() * 5), i === 13 ? 2 : 1, 10 + i, startDate); // deliberately unoptimised
   });
 
   // history: complete all past visits with plausible readings

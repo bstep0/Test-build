@@ -5,6 +5,7 @@ const path = require('node:path');
 const { open } = require('./lib/db');
 const { ensureVisits } = require('./lib/schedule');
 const Dosing = require('./public/dosing');
+const Geo = require('./public/geo');
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -15,7 +16,15 @@ const isDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && 
 const utcToday = () => new Date().toISOString().slice(0, 10);
 const addDays = (date, n) => new Date(new Date(date + 'T00:00:00Z').getTime() + n * 864e5).toISOString().slice(0, 10);
 
-function createApp(db) {
+async function nominatim(q) { // free OSM geocoder; only called when the user asks for a lookup
+  const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q),
+    { headers: { 'User-Agent': 'SplashDesk/1.0 (pool route software)' }, signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error('Geocoder returned ' + r.status);
+  const [hit] = await r.json();
+  return hit ? { lat: +hit.lat, lng: +hit.lon, display: hit.display_name } : null;
+}
+
+function createApp(db, { geocode = nominatim } = {}) {
   const routes = [];
   const route = (method, p, fn) =>
     routes.push({ method, re: new RegExp('^' + p.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), fn });
@@ -82,7 +91,7 @@ function createApp(db) {
   crud('/api/techs', 'techs', ['name', 'phone', 'color'], { required: ['name'], order: 'name' });
 
   // ---- customers ----
-  const CUST = ['name', 'phone', 'email', 'address', 'city', 'gate_code', 'notes', 'rate'];
+  const CUST = ['name', 'phone', 'email', 'address', 'city', 'gate_code', 'notes', 'rate', 'lat', 'lng'];
   route('GET', '/api/customers', () =>
     all(`SELECT c.*, (SELECT COUNT(*) FROM pools p WHERE p.customer_id=c.id) AS pools,
          COALESCE((SELECT SUM(total) FROM invoices i WHERE i.customer_id=c.id AND i.status='open'),0) AS balance
@@ -121,6 +130,8 @@ function createApp(db) {
     defaults: () => ({ start_date: utcToday() }),
     after: {
       write: (id, body, kind) => {  // reordering alone must not reshuffle; anything else regenerates lazily
+        if (kind === 'update' && body.position !== undefined)
+          run(`UPDATE visits SET position=? WHERE stop_id=? AND status='scheduled' AND date >= ?`, body.position, id, addDays(utcToday(), -1));
         if (kind === 'update' && ['tech_id', 'weekday', 'frequency', 'active', 'start_date'].some((k) => body[k] !== undefined)) dropFuture(id);
       },
       beforeDelete: (id) => dropFuture(id),
@@ -129,7 +140,7 @@ function createApp(db) {
 
   // ---- visits / daily route ----
   const VISIT_SELECT = `SELECT v.*, p.name AS pool_name, p.type AS pool_type, p.volume_gal, p.notes AS pool_notes,
-      c.id AS customer_id, c.name AS customer_name, c.address, c.city, c.phone, c.gate_code, c.notes AS customer_notes,
+      c.id AS customer_id, c.name AS customer_name, c.address, c.city, c.lat, c.lng, c.phone, c.gate_code, c.notes AS customer_notes,
       t.name AS tech_name, t.color AS tech_color
     FROM visits v JOIN pools p ON p.id=v.pool_id JOIN customers c ON c.id=p.customer_id LEFT JOIN techs t ON t.id=v.tech_id`;
   const VISIT = ['pool_id', 'tech_id', 'date', 'position', 'status', 'arrived_at', 'completed_at', 'fc', 'ph', 'ta', 'cya', 'ch', 'salt', 'temp', 'tasks', 'chemicals', 'notes', 'price'];
@@ -266,6 +277,110 @@ function createApp(db) {
     return { ok: true };
   });
 
+  // ---- settings (depot, speeds) ----
+  const SETTING_DEFAULTS = { depot_name: 'Shop', depot_address: '', depot_lat: null, depot_lng: null, speed_mph: 25, service_min: 25, round_trip: 1 };
+  const getSettings = () => {
+    const out = { ...SETTING_DEFAULTS };
+    for (const r of all('SELECT key, value FROM settings')) if (r.key in out) out[r.key] = JSON.parse(r.value);
+    return out;
+  };
+  route('GET', '/api/settings', () => getSettings());
+  route('PUT', '/api/settings', ({ body }) => {
+    for (const [k, v] of Object.entries(body)) {
+      if (!(k in SETTING_DEFAULTS)) continue;
+      const numeric = typeof SETTING_DEFAULTS[k] === 'number' || k.endsWith('_lat') || k.endsWith('_lng');
+      let x = numeric ? (v === '' || v === null ? null : Number(v)) : v;
+      if (numeric && x !== null && isNaN(x)) throw bad(`${k} must be a number`);
+      if (['speed_mph', 'service_min'].includes(k) && !(x > 0)) throw bad(`${k} must be positive`);
+      run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, JSON.stringify(x));
+    }
+    return getSettings();
+  });
+  const depotOf = (s) => (Geo.has({ lat: s.depot_lat, lng: s.depot_lng }) ? { lat: s.depot_lat, lng: s.depot_lng } : null);
+
+  route('POST', '/api/geocode', async ({ body }) => {
+    if (!body.query) throw bad('query is required');
+    let hit; try { hit = await geocode(body.query); } catch (e) { throw new HttpError(502, 'Address lookup failed: ' + e.message); }
+    if (!hit) throw notFound('No match for that address');
+    return hit;
+  });
+  route('POST', '/api/geocode-missing', async () => {   // fill in map locations for customers that lack them
+    const todo = all(`SELECT id, address, city FROM customers WHERE (lat IS NULL OR lng IS NULL) AND address != '' LIMIT 20`);
+    let updated = 0, failed = 0;
+    for (const c of todo) {
+      try {
+        const hit = await geocode(`${c.address}, ${c.city}`);
+        if (hit) { run('UPDATE customers SET lat=?, lng=? WHERE id=?', hit.lat, hit.lng, c.id); updated++; } else failed++;
+      } catch { failed++; }
+      if (geocode === nominatim) await new Promise((r) => setTimeout(r, 1100)); // be polite to the free service
+    }
+    return { updated, failed, remaining: one(`SELECT COUNT(*) AS n FROM customers WHERE (lat IS NULL OR lng IS NULL) AND address != ''`).n };
+  });
+
+  // ---- route builder board + optimiser ----
+  route('GET', '/api/board', ({ query }) => {
+    const stops = all(
+      `SELECT s.*, p.name AS pool_name, p.volume_gal, c.id AS customer_id, c.name AS customer_name, c.address, c.city, c.lat, c.lng, c.rate,
+              t.name AS tech_name, t.color AS tech_color
+       FROM stops s JOIN pools p ON p.id=s.pool_id JOIN customers c ON c.id=p.customer_id LEFT JOIN techs t ON t.id=s.tech_id
+       WHERE s.active=1 ${query.tech_id ? 'AND s.tech_id=?' : ''} ORDER BY s.weekday, s.position, s.id`, ...(query.tech_id ? [query.tech_id] : []));
+    const unassigned = all(
+      `SELECT p.id AS pool_id, p.name AS pool_name, p.volume_gal, c.id AS customer_id, c.name AS customer_name, c.address, c.city, c.lat, c.lng, c.rate
+       FROM pools p JOIN customers c ON c.id=p.customer_id
+       WHERE NOT EXISTS (SELECT 1 FROM stops s WHERE s.pool_id=p.id AND s.active=1) ORDER BY c.name COLLATE NOCASE`);
+    return { stops, unassigned, settings: getSettings() };
+  });
+
+  // Optimise either a calendar day's visits ({date}) or the recurring weekday template ({weekday}).
+  // One independent route per technician. `apply: false` previews without saving.
+  route('POST', '/api/routes/optimize', ({ body }) => {
+    const st = getSettings(), depot = depotOf(st), roundTrip = !!st.round_trip;
+    const byDate = isDate(body.date);
+    if (!byDate && !(Number.isInteger(body.weekday) && body.weekday >= 0 && body.weekday <= 6)) throw bad('date or weekday is required');
+    const techFilter = body.tech_id ? ' AND x.tech_id = ?' : '';
+    const args = body.tech_id ? [body.tech_id] : [];
+    let rows;
+    if (byDate) {
+      ensureVisits(db, body.date);
+      rows = all(`SELECT x.id, x.tech_id, x.position, x.status, c.lat, c.lng FROM visits x JOIN pools p ON p.id=x.pool_id JOIN customers c ON c.id=p.customer_id
+                  WHERE x.date=?${techFilter} ORDER BY x.position, x.id`, body.date, ...args);
+    } else {
+      rows = all(`SELECT x.id, x.tech_id, x.position, 'scheduled' AS status, c.lat, c.lng FROM stops x JOIN pools p ON p.id=x.pool_id JOIN customers c ON c.id=p.customer_id
+                  WHERE x.active=1 AND x.weekday=?${techFilter} ORDER BY x.position, x.id`, body.weekday, ...args);
+    }
+    const groups = new Map();
+    for (const r of rows) { const k = r.tech_id ?? 0; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+    const result = { applied: !!body.apply, groups: [], before_miles: 0, after_miles: 0, depot_assumed: !depot, missing: 0 };
+    const opts = { roundTrip, speed: st.speed_mph, serviceMin: st.service_min };
+    const upd = db.prepare(byDate ? 'UPDATE visits SET position=? WHERE id=?' : 'UPDATE stops SET position=? WHERE id=?');
+    const updVisitsOfStop = db.prepare(`UPDATE visits SET position=? WHERE stop_id=? AND status='scheduled' AND date >= ?`);
+    for (const [techId, list] of groups) {
+      const fixed = list.filter((r) => r.status !== 'scheduled');          // done/skipped visits stay put
+      const movable = list.filter((r) => r.status === 'scheduled');
+      const o = Geo.optimizeItems(depot, movable, { roundTrip });
+      const base = fixed.reduce((m, r) => Math.max(m, r.position), 0);
+      const before = Geo.stats(depot, movable, opts), after = Geo.stats(depot, o.ordered, opts);
+      result.groups.push({
+        tech_id: techId || null, tech_name: techId ? one('SELECT name FROM techs WHERE id=?', techId)?.name : 'Unassigned',
+        count: movable.length, located: before.located, before_miles: o.before, after_miles: o.after,
+        before_min: before.totalMin, after_min: after.totalMin, order: o.ordered.map((r) => r.id),
+      });
+      result.before_miles += o.before; result.after_miles += o.after; result.missing += o.missing;
+      if (body.apply) {
+        db.exec('BEGIN');
+        try {
+          o.ordered.forEach((r, i) => {
+            const pos = (byDate ? base : 0) + (i + 1) * 10;
+            upd.run(pos, r.id);
+            if (!byDate) updVisitsOfStop.run(pos, r.id, addDays(utcToday(), -1));
+          });
+          db.exec('COMMIT');
+        } catch (e) { db.exec('ROLLBACK'); throw e; }
+      }
+    }
+    return result;
+  });
+
   // ---- dashboard + dosing ----
   route('GET', '/api/dashboard', ({ query }) => {
     const date = isDate(query.date) ? query.date : utcToday();
@@ -309,7 +424,7 @@ function createApp(db) {
       if (!m) continue;
       pathMatched = true;
       if (r.method !== req.method) continue;
-      const out = r.fn({ params: { ...m.groups }, query, body });
+      const out = await r.fn({ params: { ...m.groups }, query, body });
       return send(res, 200, out);
     }
     throw pathMatched ? new HttpError(405, 'Method not allowed') : notFound();

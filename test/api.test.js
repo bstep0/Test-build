@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { open } = require('../lib/db');
 const { createApp } = require('../server');
 const Dosing = require('../public/dosing');
+const Geo = require('../public/geo');
 
 let server, base;
 const call = async (method, path, body) => {
@@ -13,7 +14,7 @@ const call = async (method, path, body) => {
 const nextWeekday = (wd) => { const d = new Date(); while (d.getUTCDay() !== wd) d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
 
 test.before(async () => {
-  server = createApp(open(':memory:'));
+  server = createApp(open(':memory:'), { geocode: async (q) => (q.includes('Nowhere') ? null : { lat: 37.4, lng: -122.1, display: q }) });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -103,4 +104,59 @@ test('dosing analysis', () => {
   assert.match(r.cya.dose.text, /drain/i);
   assert.equal(Dosing.analyze(20000, { ph: 7.1 })[0].dose.text, '1.5 lb'); // 0.4 pH ÷ 0.2 × 6 oz × 2 = 24 oz
   assert.deepEqual(Dosing.analyze(10000, { fc: '', ph: null }), []);
+});
+
+test('optimizer untangles a zig-zag route', () => {
+  const depot = { lat: 37.0, lng: -122.0 };
+  const line = [1, 2, 3, 4, 5, 6].map((k) => ({ id: k, lat: 37.0 + k * 0.02, lng: -122.0 }));
+  const scrambled = [line[3], line[0], line[5], line[1], line[4], line[2], { id: 99 /* no coordinates */ }];
+  const r = Geo.optimizeItems(depot, scrambled);
+  assert.deepEqual(r.ordered.map((x) => x.id), [1, 2, 3, 4, 5, 6, 99]);
+  assert.ok(r.after < r.before * 0.6, `expected a big saving, got ${r.before} → ${r.after}`);
+  assert.equal(r.missing, 1);
+  const s = Geo.stats(depot, line, { speed: 30, serviceMin: 20 });
+  assert.equal(s.workMin, 120);
+  assert.ok(s.driveMin > 0 && s.totalMin === s.driveMin + 120);
+});
+
+test('route builder: settings, board and optimise endpoint', async () => {
+  assert.equal((await call('PUT', '/api/settings', { depot_lat: 37.0, depot_lng: -122.0, speed_mph: 0 })).status, 400);
+  const st = (await call('PUT', '/api/settings', { depot_lat: 37.0, depot_lng: -122.0, speed_mph: 30 })).body;
+  assert.equal(st.speed_mph, 30);
+
+  const tech = (await call('POST', '/api/techs', { name: 'Route Tech' })).body;
+  const ids = [];
+  for (const k of [4, 1, 6, 2, 5, 3]) {   // created out of geographic order on purpose
+    const c = (await call('POST', '/api/customers', { name: 'Opt ' + k, lat: 37.0 + k * 0.02, lng: -122.0 })).body;
+    const p = (await call('POST', '/api/pools', { customer_id: c.id })).body;
+    ids.push((await call('POST', '/api/stops', { pool_id: p.id, tech_id: tech.id, weekday: 6, position: ids.length * 10 + 10, start_date: '2020-01-01' })).body.id);
+  }
+  const board = (await call('GET', `/api/board?tech_id=${tech.id}`)).body;
+  assert.equal(board.stops.length, 6);
+  assert.ok(Array.isArray(board.unassigned));
+
+  const prev = (await call('POST', '/api/routes/optimize', { weekday: 6, tech_id: tech.id })).body;
+  assert.equal(prev.applied, false);
+  assert.ok(prev.after_miles < prev.before_miles);
+  const unchanged = (await call('GET', `/api/board?tech_id=${tech.id}`)).body.stops.map((s) => s.customer_name);
+  assert.equal(unchanged[0], 'Opt 4', 'preview must not save');
+
+  await call('POST', '/api/routes/optimize', { weekday: 6, tech_id: tech.id, apply: true });
+  const after = (await call('GET', `/api/board?tech_id=${tech.id}`)).body.stops.map((s) => s.customer_name);
+  assert.deepEqual(after, ['Opt 1', 'Opt 2', 'Opt 3', 'Opt 4', 'Opt 5', 'Opt 6']);
+
+  const sat = nextWeekday(6);
+  const day = (await call('POST', '/api/routes/optimize', { date: sat, tech_id: tech.id, apply: true })).body;
+  assert.equal(day.groups[0].count, 6);
+  const visits = (await call('GET', `/api/day/${sat}?tech_id=${tech.id}`)).body.map((v) => v.customer_name);
+  assert.deepEqual(visits, ['Opt 1', 'Opt 2', 'Opt 3', 'Opt 4', 'Opt 5', 'Opt 6']);
+  assert.equal((await call('POST', '/api/routes/optimize', {})).status, 400);
+});
+
+test('geocoding endpoints use the injected geocoder', async () => {
+  assert.equal((await call('POST', '/api/geocode', { query: '1 Main St' })).body.lat, 37.4);
+  assert.equal((await call('POST', '/api/geocode', { query: 'Nowhere' })).status, 404);
+  await call('POST', '/api/customers', { name: 'Needs Pin', address: '5 Elm St', city: 'Town' });
+  const r = (await call('POST', '/api/geocode-missing')).body;
+  assert.ok(r.updated >= 1);
 });
