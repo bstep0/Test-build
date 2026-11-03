@@ -1,0 +1,14 @@
+{
+  "name": "splashdesk",
+  "version": "1.0.0",
+  "description": "Pool service management: customers, routes, visit logs with chemistry, work orders, invoicing.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "demo": "SEED_DEMO=1 node server.js",
+    "seed": "node seed.js",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=22.13" },
+  "license": "MIT"
+}

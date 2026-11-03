@@ -1,0 +1,89 @@
+'use strict';
+// Demo data: 3 techs, 14 customers on weekly routes, 3 weeks of visit history, work orders, invoices.
+const { ensureVisits } = require('./lib/schedule');
+
+function rng(seed) { // deterministic PRNG so the demo looks the same every time
+  return () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+const iso = (d) => d.toISOString().slice(0, 10);
+
+function seed(db, today = new Date()) {
+  const rand = rng(42);
+  const pick = (a) => a[Math.floor(rand() * a.length)];
+  const between = (lo, hi, step = 1) => +(Math.round((lo + rand() * (hi - lo)) / step) * step).toFixed(2);
+  const ins = (sql, ...a) => Number(db.prepare(sql).run(...a).lastInsertRowid);
+
+  const techs = [['Maria Lopez', '#0ea5e9'], ['Dan Whitaker', '#f97316'], ['Priya Nair', '#22c55e']]
+    .map(([n, c], i) => ins('INSERT INTO techs (name, phone, color) VALUES (?,?,?)', n, `555-010${i}`, c));
+
+  const people = [
+    ['Harper Residence', '1204 Palm Ave', 'Sunnyvale', 135], ['The Okafor Family', '88 Cedar Ct', 'Sunnyvale', 120],
+    ['Lindqvist, Erik', '9 Marlin Way', 'Sunnyvale', 140], ['Ramirez Household', '312 Orchard Ln', 'Cupertino', 125],
+    ['Bayview HOA', '1 Bayview Dr', 'Cupertino', 260], ['Chen & Park', '47 Willow Creek Rd', 'Cupertino', 150],
+    ['Dr. Abrams', '700 Summit Ridge', 'Los Altos', 180], ['Greenfield Residence', '23 Alder St', 'Los Altos', 130],
+    ['Moreau, Claire', '510 Vista Pl', 'Los Altos', 145], ['Kowalski Family', '66 Birch Hollow', 'Mountain View', 120],
+    ['Nguyen Residence', '1801 Sierra Vista', 'Mountain View', 135], ['Tanaka Household', '29 Laurel Ct', 'Mountain View', 125],
+    ['Sullivan, Pat', '402 Hillcrest Blvd', 'Sunnyvale', 150], ['Delgado Family', '77 Meadowlark Ln', 'Cupertino', 130],
+  ];
+  const start = new Date(today); start.setUTCDate(start.getUTCDate() - 28);
+  const startDate = iso(start);
+
+  people.forEach(([name, address, city, rate], i) => {
+    const slug = name.toLowerCase().replace(/[^a-z]+/g, '.').replace(/^\.|\.$/g, '');
+    const c = ins('INSERT INTO customers (name, phone, email, address, city, gate_code, notes, rate) VALUES (?,?,?,?,?,?,?,?)',
+      name, `555-02${String(10 + i).padStart(2, '0')}`, `${slug}@example.com`, address, city,
+      i % 3 === 0 ? String(1000 + i * 37) : '', i % 4 === 1 ? 'Dog in backyard — text before arriving.' : '', rate);
+    const p = ins('INSERT INTO pools (customer_id, name, type, volume_gal, surface, sanitizer, notes) VALUES (?,?,?,?,?,?,?)',
+      c, i % 5 === 4 ? 'Lap pool' : 'Pool', i % 5 === 2 ? 'Pool & spa' : 'Pool', between(10000, 30000, 1000),
+      pick(['Plaster', 'Pebble', 'Vinyl', 'Fiberglass']), i % 3 === 0 ? 'Salt' : 'Chlorine',
+      i % 3 === 0 ? 'Salt cell — inspect every month.' : '');
+    ins('INSERT INTO stops (pool_id, tech_id, weekday, frequency, position, start_date) VALUES (?,?,?,?,?,?)',
+      p, techs[i % 3], (i % 5) + 1, i === 13 ? 2 : 1, 10 + Math.floor(i / 5) * 10, startDate);
+  });
+
+  // history: complete all past visits with plausible readings
+  const done = db.prepare(`UPDATE visits SET status='done', arrived_at=?, completed_at=?, fc=?, ph=?, ta=?, cya=?, ch=?, salt=?, temp=?, tasks=?, notes=? WHERE id=?`);
+  const todayStr = iso(today);
+  for (let d = new Date(start); iso(d) < todayStr; d.setUTCDate(d.getUTCDate() + 1)) {
+    const date = iso(d);
+    ensureVisits(db, date);
+    for (const v of db.prepare('SELECT v.id, p.sanitizer FROM visits v JOIN pools p ON p.id=v.pool_id WHERE v.date=?').all(date)) {
+      if (rand() < 0.05) { db.prepare(`UPDATE visits SET status='skipped', notes='Customer away' WHERE id=?`).run(v.id); continue; }
+      const t = `${date}T${String(8 + Math.floor(rand() * 8)).padStart(2, '0')}:15:00.000Z`;
+      done.run(t, t, between(1, 5.5, 0.5), between(7.0, 8.0, 0.1), between(60, 130, 5), between(25, 70, 5),
+        between(180, 420, 10), v.sanitizer === 'Salt' ? between(2600, 3500, 100) : null, between(68, 86),
+        JSON.stringify(['Skim surface', 'Brush walls & steps', 'Empty baskets', 'Test water']), '', v.id);
+    }
+  }
+
+  const poolId = (n) => db.prepare('SELECT id FROM pools ORDER BY id LIMIT 1 OFFSET ?').get(n).id;
+  const wo = (pool, tech, title, description, price, status, due) =>
+    ins('INSERT INTO work_orders (pool_id, tech_id, title, description, price, status, due_date, completed_at) VALUES (?,?,?,?,?,?,?,?)',
+      poolId(pool), techs[tech], title, description, price, status, due, status === 'done' ? iso(new Date(today - 3 * 864e5)) + 'T16:00:00.000Z' : null);
+  wo(0, 0, 'Replace pump motor', 'Motor is humming but not spinning. Quote approved by phone.', 640, 'scheduled', iso(new Date(+today + 2 * 864e5)));
+  wo(3, 1, 'Re-grout waterline tile', 'Approx. 12 linear feet.', 380, 'open', null);
+  wo(4, 2, 'Replace cartridge filter', 'Pentair Clean & Clear Plus 520.', 295, 'open', iso(new Date(+today + 6 * 864e5)));
+  wo(6, 0, 'Replace salt cell', 'Cell reading low output after acid wash.', 520, 'done', null);
+
+  // one paid and one open invoice from history
+  const bill = (cid, status) => {
+    const visits = db.prepare(`SELECT v.id, v.date, v.price FROM visits v JOIN pools p ON p.id=v.pool_id WHERE p.customer_id=? AND v.status='done' AND v.invoice_id IS NULL AND v.date < ? ORDER BY v.date`).all(cid, iso(new Date(today - 10 * 864e5)));
+    if (!visits.length) return;
+    const items = visits.map((v) => ({ desc: `Pool service (${v.date})`, qty: 1, price: v.price }));
+    const total = items.reduce((s, i) => s + i.price, 0);
+    const id = ins('INSERT INTO invoices (customer_id, issued, due, status, items, total, paid_at, method) VALUES (?,?,?,?,?,?,?,?)',
+      cid, iso(new Date(today - 9 * 864e5)), iso(new Date(today + 5 * 864e5)), status, JSON.stringify(items), total, status === 'paid' ? iso(new Date(today - 4 * 864e5)) : null, status === 'paid' ? 'Card' : '');
+    for (const v of visits) db.prepare('UPDATE visits SET invoice_id=? WHERE id=?').run(id, v.id);
+  };
+  bill(1, 'paid'); bill(2, 'open'); bill(5, 'open');
+}
+
+module.exports = { seed };
+
+if (require.main === module) {
+  const { open } = require('./lib/db');
+  const db = open();
+  if (db.prepare('SELECT 1 FROM techs LIMIT 1').get()) { console.error('Database already has data; delete data/splashdesk.db to reseed.'); process.exit(1); }
+  seed(db);
+  console.log('Seeded demo data.');
+}
