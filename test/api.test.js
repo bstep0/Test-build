@@ -6,17 +6,23 @@ const { createApp } = require('../server');
 const Dosing = require('../public/dosing');
 const Geo = require('../public/geo');
 
-let server, base;
-const call = async (method, path, body) => {
-  const r = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
-  return { status: r.status, body: await r.json() };
+let server, base, cookie = '';
+const call = async (method, path, body, as = cookie) => {
+  const r = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...(as ? { Cookie: as } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const set = r.headers.get('set-cookie');
+  if (set && as === cookie && /sd_session=[^;]+/.test(set) && path.startsWith('/api/auth/')) cookie = set.split(';')[0];
+  return { status: r.status, body: await r.json().catch(() => ({})), headers: r.headers };
 };
+const cookieOf = (r) => r.headers.get('set-cookie').split(';')[0];
 const nextWeekday = (wd) => { const d = new Date(); while (d.getUTCDay() !== wd) d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
 
 test.before(async () => {
   server = createApp(open(':memory:'), { geocode: async (q) => (q.includes('Nowhere') ? null : { lat: 37.4, lng: -122.1, display: q }) });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
+  const me = (await call('GET', '/api/auth/me')).body;
+  assert.equal(me.needsSetup, true);
+  assert.equal((await call('POST', '/api/auth/setup', { name: 'Olivia Owner', email: 'owner@test.dev', password: 'correct horse', company: 'Test Pools' })).status, 200);
 });
 test.after(() => server.close());
 
@@ -159,4 +165,89 @@ test('geocoding endpoints use the injected geocoder', async () => {
   await call('POST', '/api/customers', { name: 'Needs Pin', address: '5 Elm St', city: 'Town' });
   const r = (await call('POST', '/api/geocode-missing')).body;
   assert.ok(r.updated >= 1);
+});
+
+test('auth: sign-in required, setup only once, throttling', async () => {
+  assert.equal((await call('GET', '/api/customers', null, '')).status, 401);
+  assert.equal((await call('POST', '/api/auth/setup', { name: 'X', email: 'x@y.zz', password: 'longenough' }, '')).status, 403);
+  assert.equal((await call('POST', '/api/auth/login', { email: 'owner@test.dev', password: 'nope' }, '')).status, 401);
+  const ok = await call('POST', '/api/auth/login', { email: 'OWNER@test.dev', password: 'correct horse' }, '');
+  assert.equal(ok.status, 200);
+  assert.match(ok.headers.get('set-cookie'), /HttpOnly; SameSite=Lax/);
+  assert.equal((await call('GET', '/api/customers', null, cookieOf(ok))).status, 200);
+  for (let i = 0; i < 8; i++) await call('POST', '/api/auth/login', { email: 'spray@test.dev', password: 'x' }, '');
+  assert.equal((await call('POST', '/api/auth/login', { email: 'spray@test.dev', password: 'x' }, '')).status, 429);
+  const out = await call('POST', '/api/auth/logout', {}, cookieOf(ok));
+  assert.equal((await call('GET', '/api/customers', null, cookieOf(ok))).status, 401, 'session revoked');
+});
+
+test('cross-origin writes are refused', async () => {
+  const r = await fetch(base + '/api/customers', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: 'https://evil.example' }, body: '{"name":"x"}' });
+  assert.equal(r.status, 403);
+});
+
+test('roles: technicians only see and edit their own stops', async () => {
+  const techA = (await call('POST', '/api/users', { name: 'Tina Tech', email: 'tina@test.dev', password: 'password1', role: 'tech' })).body;
+  const techB = (await call('POST', '/api/users', { name: 'Bob Tech', email: 'bob@test.dev', password: 'password1', role: 'tech' })).body;
+  assert.ok(techA.tech_id && techB.tech_id && techA.tech_id !== techB.tech_id, 'tech rows auto-created');
+  const cust = (await call('POST', '/api/customers', { name: 'Role Test', rate: 90 })).body;
+  const pool = (await call('POST', '/api/pools', { customer_id: cust.id })).body;
+  await call('POST', '/api/stops', { pool_id: pool.id, tech_id: techA.tech_id, weekday: 2, start_date: '2020-01-01' });
+  const date = nextWeekday(2);
+  const tina = cookieOf(await call('POST', '/api/auth/login', { email: 'tina@test.dev', password: 'password1' }, ''));
+  const bob = cookieOf(await call('POST', '/api/auth/login', { email: 'bob@test.dev', password: 'password1' }, ''));
+  const mine = (await call('GET', `/api/day/${date}`, null, tina)).body;
+  assert.equal(mine.length, 1);
+  assert.equal((await call('GET', `/api/day/${date}?tech_id=${techB.tech_id}`, null, tina)).body.length, 1, 'tech_id query cannot widen scope');
+  assert.equal((await call('GET', `/api/day/${date}`, null, bob)).body.length, 0);
+  assert.equal((await call('GET', `/api/visits/${mine[0].id}`, null, bob)).status, 403);
+  const put = await call('PUT', `/api/visits/${mine[0].id}`, { status: 'done', ph: 7.4, price: 1, tech_id: techB.tech_id }, tina);
+  assert.equal(put.status, 200);
+  assert.equal(put.body.price, 90, 'technicians cannot change price');
+  assert.equal(put.body.tech_id, techA.tech_id);
+  for (const [m, p] of [['GET', '/api/customers'], ['GET', '/api/invoices'], ['GET', '/api/users'], ['PUT', '/api/settings'], ['POST', '/api/routes/optimize']])
+    assert.equal((await call(m, p, m === 'GET' ? null : {}, tina)).status, 403, `${m} ${p}`);
+  assert.equal((await call('POST', '/api/dose', { volume: 10000, readings: { ph: 8 } }, tina)).status, 200);
+  // office: no user management or settings writes, but can run the business
+  await call('POST', '/api/users', { name: 'Ola Office', email: 'ola@test.dev', password: 'password1', role: 'office' });
+  const ola = cookieOf(await call('POST', '/api/auth/login', { email: 'ola@test.dev', password: 'password1' }, ''));
+  assert.equal((await call('GET', '/api/invoices', null, ola)).status, 200);
+  assert.equal((await call('GET', '/api/users', null, ola)).status, 403);
+  assert.equal((await call('PUT', '/api/settings', { speed_mph: 20 }, ola)).status, 403);
+});
+
+test('users: last owner is protected; deactivation signs people out', async () => {
+  const users = (await call('GET', '/api/users')).body;
+  const owner = users.find((u) => u.role === 'owner');
+  assert.equal((await call('PUT', `/api/users/${owner.id}`, { role: 'office' })).status, 400);
+  assert.equal((await call('DELETE', `/api/users/${owner.id}`)).status, 400);
+  const bob = users.find((u) => u.email === 'bob@test.dev');
+  const bobCookie = cookieOf(await call('POST', '/api/auth/login', { email: 'bob@test.dev', password: 'password1' }, ''));
+  await call('PUT', `/api/users/${bob.id}`, { active: false });
+  assert.equal((await call('GET', '/api/day/2030-01-01', null, bobCookie)).status, 401);
+  assert.equal((await call('POST', '/api/auth/login', { email: 'bob@test.dev', password: 'password1' }, '')).status, 401);
+  assert.equal((await call('POST', '/api/auth/password', { current: 'wrong', password: 'newpassword1' })).status, 403);
+});
+
+test('customers are archived, not destroyed; audit trail records changes', async () => {
+  const c = (await call('POST', '/api/customers', { name: 'Archive Me', rate: 80 })).body;
+  const p = (await call('POST', '/api/pools', { customer_id: c.id })).body;
+  await call('POST', '/api/stops', { pool_id: p.id, weekday: 3, start_date: '2020-01-01' });
+  assert.equal((await call('DELETE', `/api/customers/${c.id}`)).body.archived, true);
+  assert.ok(!(await call('GET', '/api/customers')).body.some((x) => x.id === c.id));
+  assert.ok((await call('GET', '/api/customers?archived=1')).body.some((x) => x.id === c.id));
+  assert.ok(!(await call('GET', `/api/day/${nextWeekday(3)}`)).body.some((v) => v.pool_id === p.id), 'archived customers leave the route');
+  assert.equal((await call('GET', `/api/customers/${c.id}`)).status, 200, 'history is still readable');
+  await call('POST', `/api/customers/${c.id}/restore`);
+  assert.ok((await call('GET', '/api/customers')).body.some((x) => x.id === c.id));
+  const audit = (await call('GET', '/api/audit?limit=50')).body;
+  assert.ok(audit.some((a) => a.method === 'DELETE' && a.path === `/api/customers/${c.id}` && a.user_name === 'Olivia Owner'));
+  assert.ok(!audit.some((a) => /password/i.test(a.summary)), 'secrets never logged');
+});
+
+test('health check and security headers', async () => {
+  assert.equal((await fetch(base + '/healthz')).status, 200);
+  const r = await fetch(base + '/');
+  assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(r.headers.get('content-security-policy'), /frame-ancestors 'none'/);
 });

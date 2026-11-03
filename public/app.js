@@ -43,11 +43,18 @@ const icon = (n) => raw(`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">$
 const NAV = [
   ['Operations', [['dashboard', 'Dashboard', 'grid'], ['route', 'Daily route', 'route'], ['builder', 'Route builder', 'columns']]],
   ['Business', [['customers', 'Customers', 'users'], ['workorders', 'Work orders', 'wrench'], ['invoices', 'Invoices', 'file']]],
-  ['Tools', [['dose', 'Dosing', 'drop'], ['team', 'Team', 'badge'], ['settings', 'Settings', 'sliders']]],
+  ['Tools', [['dose', 'Dosing', 'drop'], ['team', 'Team', 'users'], ['settings', 'Settings', 'sliders']]],
 ];
-$('#nav').innerHTML = html`<a class="brand" href="#/dashboard"><span class="logo">${icon('wave')}</span><span>SplashDesk<small>Pool service</small></span></a>
-  ${NAV.map(([sec, items]) => html`<div class="sec">${sec}</div>${items.map(([k, l, ic]) => html`<a class="item" href="#/${k}" data-nav="${k}">${icon(ic)}<span>${l}</span></a>`)}`)}
-  <div class="foot"><b>Pro tip</b>Drag pools onto days in the Route builder, then hit Optimize to cut drive time.</div>`.s;
+const TECH_VIEWS = ['route', 'visit', 'dose', 'account'];
+function buildNav() {
+  const tech = me?.role === 'tech';
+  document.body.classList.toggle('role-tech', tech);
+  const sections = tech ? [['Field', [['route', 'My route', 'route'], ['dose', 'Dosing', 'drop'], ['account', 'Account', 'badge']]]]
+    : NAV.map(([sec, items]) => [sec, items.concat(sec === 'Tools' ? [['account', 'Account', 'badge']] : [])]);
+  $('#nav').innerHTML = html`<a class="brand" href="#/${tech ? 'route' : 'dashboard'}"><span class="logo">${icon('wave')}</span><span>SplashDesk<small>Pool service</small></span></a>
+    ${sections.map(([sec, items]) => html`<div class="sec">${sec}</div>${items.map(([k, l, ic]) => html`<a class="item" href="#/${k}" data-nav="${k}">${icon(ic)}<span>${l}</span></a>`)}`)}
+    <div class="foot"><b>${me?.name}</b>${me?.role}${tech ? '' : html`<br><span style="opacity:.8">Tip: drag pools onto days in the Route builder, then Optimize.</span>`}</div>`.s;
+}
 
 const pageHead = (title, sub, actions = '') => html`<div class="page-head"><div><h1>${title}</h1>${sub ? html`<div class="sub">${sub}</div>` : ''}</div><div class="row noprint">${actions}</div></div>`;
 const fmtMi = (n) => (n || 0).toFixed(1) + ' mi';
@@ -115,9 +122,17 @@ async function optimizeFlow(items, title) {
     onSave: async () => { if (can) { await Promise.all(items.map((i) => POST('/routes/optimize', { ...i.body, apply: true }))); toast('Route optimized'); } } });
 }
 
+let me = null;                                    // signed-in user, set by boot()/afterLogin()
+const queueable = (m, u) => (m === 'PUT' && /^\/visits\/\d+$/.test(u)) || (m === 'POST' && /^\/visits\/\d+\/photos$/.test(u));
 async function api(method, url, body) {
-  const r = await fetch('/api' + url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  let r;
+  try { r = await fetch('/api' + url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }); }
+  catch (e) {                                       // network failure: field work is queued and synced later
+    if (queueable(method, url) && window.Queue) { await Queue.add({ method, url, body }); return { ...(body || {}), queued: true }; }
+    throw new Error("You're offline — this needs a connection");
+  }
   const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && !url.startsWith('/auth/')) { me = null; window.showAuth?.(false); throw new Error('Please sign in'); }
   if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
   return data;
 }
@@ -143,10 +158,10 @@ function fieldHtml(f, v) {
   else input = html`<input name="${f.name}" type="${f.type || 'text'}" value="${val_}" ${raw(f.step ? `step="${f.step}"` : '')} ${raw(f.required ? 'required' : '')} ${raw(f.type === 'tel' ? 'inputmode="tel"' : '')}>`;
   return html`<label${raw(cls)}>${f.label}${input}</label>`;
 }
-function openForm({ title, fields, values = {}, onSave, onDelete, saveLabel = 'Save', message }) {
+function openForm({ title, fields, values = {}, onSave, onDelete, saveLabel = 'Save', message, deleteLabel = 'Delete', deleteMsg = 'Delete this permanently?' }) {
   modal.innerHTML = html`<form method="dialog" id="mform"><h3 class="dt">${title}</h3>${message ? html`<div class="msg">${message}</div>` : html`<div style="height:12px"></div>`}
     ${fields.length ? html`<div class="fields">${fields.map((f) => fieldHtml(f, values))}</div>` : ''}
-    <div class="row spread mt"><div>${onDelete ? raw('<button type="button" class="btn danger" data-m="delete">Delete</button>') : ''}</div>
+    <div class="row spread mt"><div>${onDelete ? html`<button type="button" class="btn danger" data-m="delete">${deleteLabel}</button>` : ''}</div>
     <div class="row"><button type="button" class="btn" data-m="cancel">Cancel</button><button class="btn primary">${saveLabel}</button></div></div></form>`.s;
   const form = $('#mform', modal);
   form.onsubmit = guard(async (e) => {
@@ -164,7 +179,7 @@ function openForm({ title, fields, values = {}, onSave, onDelete, saveLabel = 'S
   });
   form.querySelector('[data-m=cancel]').onclick = () => modal.close();
   const d = form.querySelector('[data-m=delete]');
-  if (d) d.onclick = guard(async () => { if (confirm('Delete this permanently?')) { await onDelete(); modal.close(); await render(); } });
+  if (d) d.onclick = guard(async () => { if (confirm(deleteMsg)) { await onDelete(); modal.close(); await render(); } });
   modal.showModal();
   form.querySelector('input,select,textarea')?.focus();
 }
@@ -195,11 +210,13 @@ const live = {};
 // ---------- router ----------
 const views = {};
 async function render() {
-  const [name, ...args] = (location.hash.slice(2) || 'dashboard').split('/');
+  if (!me) return;
+  const [name, ...args] = (location.hash.slice(2) || (me.role === 'tech' ? 'route' : 'dashboard')).split('/');
+  if (me.role === 'tech' && !TECH_VIEWS.includes(name)) { location.hash = '#/route'; return; }
   document.querySelectorAll('nav [data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === (name === 'visit' ? 'route' : name)));
   try {
     const scroll = window.scrollY;
-    const v = await (views[name] || views.dashboard)(...args);
+    const v = await (views[name] || views[me.role === 'tech' ? 'route' : 'dashboard'])(...args);
     app.innerHTML = v.s;
     window.scrollTo(0, scroll);
   } catch (e) {
@@ -250,13 +267,13 @@ views.route = async () => {
   const groups = groupByTech(stops), tot = sumStats(groups, depot, st);
   const mapGroups = groups.map((g) => ({ color: g.color, name: g.name, stops: g.stops.map((s, i) => ({ lat: s.lat, lng: s.lng, label: i + 1, title: s.customer_name })) }));
   return html`${pageHead('Daily route', fmtDate(routeDate, { weekday: 'long', month: 'long', day: 'numeric' }) + ` · ${done} of ${stops.length} stops complete`,
-    html`<button class="btn" data-act="optDay" ${raw(stops.length < 2 ? 'disabled' : '')}>${icon('zap')} Optimize</button><button class="btn primary" data-act="addStop">${icon('plus')} One-off stop</button>`)}
+    html`<button class="btn staff-only" data-act="optDay" ${raw(stops.length < 2 ? 'disabled' : '')}>${icon('zap')} Optimize</button><button class="btn primary staff-only" data-act="addStop">${icon('plus')} One-off stop</button>`)}
   <div class="row noprint" style="margin-bottom:6px">
     <button class="btn icon" data-act="day" data-d="-1" aria-label="Previous day">‹</button>
     <input type="date" value="${routeDate}" style="width:auto" data-live="routeDate">
     <button class="btn icon" data-act="day" data-d="1" aria-label="Next day">›</button>
     <button class="btn" data-act="day" data-d="today">Today</button><span class="grow"></span>
-    <select style="width:auto" data-live="routeTech">${techOptions(ts, 'All technicians').map(([k, l]) => html`<option value="${k}" ${raw(String(k) === routeTech ? 'selected' : '')}>${l}</option>`)}</select></div>
+    <select class="staff-only" style="width:auto" data-live="routeTech">${techOptions(ts, 'All technicians').map(([k, l]) => html`<option value="${k}" ${raw(String(k) === routeTech ? 'selected' : '')}>${l}</option>`)}</select></div>
   ${stops.length ? html`<div class="split">
     <div>${groups.map((g) => { const x = Geo.stats(depot, g.stops, statOpts(st)); return html`<div class="grouphead"><span class="dot" style="background:${g.color}"></span><h3>${g.name}</h3>
         <span class="chip">${g.stops.length} ${g.stops.length === 1 ? "stop" : "stops"}</span><span class="chip">${icon('route')} ${fmtMi(x.miles)}</span><span class="chip">${icon('clock')} ${fmtMin(x.totalMin)}</span></div>
@@ -267,8 +284,8 @@ views.route = async () => {
         ${s.status === 'skipped' ? raw('<span class="badge warn">Skipped</span>') : s.status === 'done' ? raw('<span class="badge ok">Done</span>') : ''}
         <span class="row noprint" style="gap:4px;flex-wrap:nowrap">
           <a class="btn sm icon" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(s.address + ', ' + s.city)}" title="Navigate" aria-label="Navigate">${icon('pin')}</a>
-          <button class="btn sm icon" data-act="move" data-id="${s.id}" data-dir="-1" ${raw(i === 0 ? 'disabled' : '')} aria-label="Move up">↑</button>
-          <button class="btn sm icon" data-act="move" data-id="${s.id}" data-dir="1" ${raw(i === g.stops.length - 1 ? 'disabled' : '')} aria-label="Move down">↓</button></span></div>`)}`; })}</div>
+          <button class="btn sm icon staff-only" data-act="move" data-id="${s.id}" data-dir="-1" ${raw(i === 0 ? 'disabled' : '')} aria-label="Move up">↑</button>
+          <button class="btn sm icon staff-only" data-act="move" data-id="${s.id}" data-dir="1" ${raw(i === g.stops.length - 1 ? 'disabled' : '')} aria-label="Move down">↓</button></span></div>`)}`; })}</div>
     <div class="card" style="position:sticky;top:16px"><div class="row spread" style="margin-bottom:12px"><h3>Route map</h3><span class="muted small">${fmtMi(tot.miles)} · ${fmtMin(tot.min)} total</span></div>
       ${mapSvg(depot, mapGroups, { roundTrip: !!st.round_trip })}${legend(groups, depot, st)}</div></div>`
     : html`<div class="card empty mt">Nothing scheduled for this day.</div>`}`;
@@ -490,12 +507,12 @@ views.visit = async (id) => {
     <button type="button" class="btn sm" data-act="addChem">+ Add chemical</button> <span class="muted small">Charges are added to the invoice.</span></div>
   <h2>Notes & billing</h2>
   <div class="card fields"><label class="full">Notes<textarea name="notes" rows="3" placeholder="Equipment issues, observations…">${v.notes}</textarea></label>
-    <label>Technician<select name="tech_id">${techOptions(ts).map(([k, l]) => html`<option value="${k}" ${raw(String(k) === String(v.tech_id ?? '') ? 'selected' : '')}>${l}</option>`)}</select></label>
-    <label>Visit price<input name="price" type="number" step="0.01" value="${v.price}" ${raw(locked ? 'disabled' : '')}></label></div>
+    <label class="staff-only">Technician<select name="tech_id">${techOptions(ts).map(([k, l]) => html`<option value="${k}" ${raw(String(k) === String(v.tech_id ?? '') ? 'selected' : '')}>${l}</option>`)}</select></label>
+    <label class="staff-only">Visit price<input name="price" type="number" step="0.01" value="${v.price}" ${raw(locked ? 'disabled' : '')}></label></div>
   <div class="row mt noprint">
     ${v.status === 'done' ? html`<button type="button" class="btn big primary" data-act="saveVisit" data-status="done">Save changes</button><button type="button" class="btn" data-act="saveVisit" data-status="scheduled" ${raw(locked ? 'disabled' : '')}>Re-open</button>`
       : html`<button type="button" class="btn big primary" data-act="saveVisit" data-status="done">✓ Complete visit</button><button type="button" class="btn" data-act="saveVisit" data-status="scheduled">Save draft</button><button type="button" class="btn" data-act="saveVisit" data-status="skipped">Skip stop</button>`}
-    <span class="grow"></span><button type="button" class="btn danger" data-act="delVisit" data-id="${v.id}" ${raw(locked ? 'disabled' : '')}>Delete</button>
+    <span class="grow"></span><button type="button" class="btn danger staff-only" data-act="delVisit" data-id="${v.id}" ${raw(locked ? 'disabled' : '')}>Delete</button>
   </div></form>
   <div class="row small muted mt noprint">Need a repair? <a href="#" data-act="newWO" data-pool="${v.pool_id}">Create a work order for this pool</a></div>`;
 };
@@ -529,17 +546,21 @@ const CUSTOMER_FIELDS = [
   { name: 'rate', label: 'Price per visit ($)', type: 'number', step: '0.01' },
   { name: 'lat', label: 'Latitude', type: 'number', step: 'any' }, { name: 'lng', label: 'Longitude', type: 'number', step: 'any' }, { type: 'geobtn' }, { name: 'notes', label: 'Notes (dogs, access…)', type: 'textarea', full: true },
 ];
+let showArchived = false;
+actions.toggleArchived = () => { showArchived = !showArchived; render(); };
+actions.restoreCustomer = async ({ id }) => { await POST(`/customers/${id}/restore`); toast('Customer restored'); render(); };
 const customerList = async () => {
-  const list = await GET('/customers');
-  return html`<div class="row spread"><h1 style="margin:0">Customers</h1><button class="btn primary" data-act="newCustomer">+ Add customer</button></div>
+  const list = await GET('/customers' + (showArchived ? '?archived=1' : ''));
+  return html`<div class="row spread"><h1 style="margin:0">${showArchived ? 'Archived customers' : 'Customers'}</h1><div class="row"><button class="btn" data-act="toggleArchived">${showArchived ? 'Back to active' : 'Archived'}</button><button class="btn primary" data-act="newCustomer">+ Add customer</button></div></div>
   <div class="mt"><input type="search" placeholder="Search customers…" data-filter="#custtable tbody tr"></div>
   ${list.length ? html`<div class="card mt" style="padding:0;overflow-x:auto"><table id="custtable"><thead><tr><th>Name</th><th class="hide-sm">Address</th><th>Pools</th><th class="right">Rate</th><th class="right">Balance</th></tr></thead><tbody>
-    ${list.map((c) => html`<tr class="click" data-href="#/customers/${c.id}"><td><b>${c.name}</b></td><td class="hide-sm muted">${c.address}${c.city ? ', ' + c.city : ''}</td><td>${c.pools}</td><td class="right">${money(c.rate)}</td>
+    ${list.map((c) => html`<tr class="click" data-href="#/customers/${c.id}"><td><b>${c.name}</b>${showArchived ? html` <button class="btn sm" data-act="restoreCustomer" data-id="${c.id}">Restore</button>` : ''}</td><td class="hide-sm muted">${c.address}${c.city ? ', ' + c.city : ''}</td><td>${c.pools}</td><td class="right">${money(c.rate)}</td>
       <td class="right">${c.balance ? html`<span class="badge warn">${money(c.balance)}</span>` : html`<span class="muted">—</span>`}</td></tr>`)}</tbody></table></div>`
     : html`<div class="card empty mt">No customers yet. Add your first one to start building routes.</div>`}`;
 };
 actions.newCustomer = () => openForm({ title: 'New customer', fields: CUSTOMER_FIELDS, values: { rate: 120 }, onSave: async (d) => { const c = await POST('/customers', d); location.hash = '#/customers/' + c.id; } });
 actions.editCustomer = async ({ id }) => openForm({ title: 'Edit customer', fields: CUSTOMER_FIELDS, values: await GET('/customers/' + id), onSave: (d) => PUT('/customers/' + id, d),
+  deleteLabel: 'Archive', deleteMsg: 'Archive this customer? They leave the route; history and invoices are kept.',
   onDelete: async () => { await DEL('/customers/' + id); location.hash = '#/customers'; } });
 
 const POOL_FIELDS = [
@@ -697,5 +718,3 @@ views.team = async () => {
 };
 actions.newTech = () => openForm({ title: 'New technician', fields: TECH_FIELDS, values: { color: '#0ea5e9' }, onSave: (d) => POST('/techs', d) });
 actions.editTech = async ({ id }) => openForm({ title: 'Edit technician', fields: TECH_FIELDS, values: await GET('/techs/' + id), onSave: (d) => PUT('/techs/' + id, d), onDelete: () => DEL('/techs/' + id) });
-
-render();

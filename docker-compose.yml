@@ -1,0 +1,9 @@
+services:
+  splashdesk:
+    build: .
+    ports: ["3000:3000"]
+    volumes: ["splashdesk-data:/data"]
+    env_file: [{ path: .env, required: false }]
+    restart: unless-stopped
+volumes:
+  splashdesk-data:

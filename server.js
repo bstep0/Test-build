@@ -6,6 +6,8 @@ const { open } = require('./lib/db');
 const { ensureVisits } = require('./lib/schedule');
 const Dosing = require('./public/dosing');
 const Geo = require('./public/geo');
+const Auth = require('./lib/auth');
+const Ops = require('./lib/ops');
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -24,7 +26,8 @@ async function nominatim(q) { // free OSM geocoder; only called when the user as
   return hit ? { lat: +hit.lat, lng: +hit.lon, display: hit.display_name } : null;
 }
 
-function createApp(db, { geocode = nominatim } = {}) {
+function createApp(db, opts = {}) {
+  const { geocode = nominatim } = opts;
   const routes = [];
   const route = (method, p, fn) =>
     routes.push({ method, re: new RegExp('^' + p.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), fn });
@@ -92,10 +95,27 @@ function createApp(db, { geocode = nominatim } = {}) {
 
   // ---- customers ----
   const CUST = ['name', 'phone', 'email', 'address', 'city', 'gate_code', 'notes', 'rate', 'lat', 'lng'];
-  route('GET', '/api/customers', () =>
+  route('GET', '/api/customers', ({ query }) =>
     all(`SELECT c.*, (SELECT COUNT(*) FROM pools p WHERE p.customer_id=c.id) AS pools,
          COALESCE((SELECT SUM(total) FROM invoices i WHERE i.customer_id=c.id AND i.status='open'),0) AS balance
-         FROM customers c ORDER BY c.name COLLATE NOCASE`));
+         FROM customers c WHERE c.archived = ? ORDER BY c.name COLLATE NOCASE`, query.archived === '1' ? 1 : 0));
+  // Deleting a customer archives them (history and invoices are kept); owners may purge permanently.
+  route('DELETE', '/api/customers/:id', ({ params, query, user }) => {
+    const c = one('SELECT id FROM customers WHERE id=?', params.id);
+    if (!c) throw notFound();
+    if (query.permanent === '1') {
+      if (user.role !== 'owner') throw new HttpError(403, 'Only an owner can permanently delete a customer');
+      run('DELETE FROM customers WHERE id=?', c.id);
+      return { ok: true, permanent: true };
+    }
+    run('UPDATE customers SET archived=1 WHERE id=?', c.id);
+    for (const s of all('SELECT s.id FROM stops s JOIN pools p ON p.id=s.pool_id WHERE p.customer_id=?', c.id)) { run('UPDATE stops SET active=0 WHERE id=?', s.id); dropFuture(s.id); }
+    return { ok: true, archived: true };
+  });
+  route('POST', '/api/customers/:id/restore', ({ params }) => {
+    if (!run('UPDATE customers SET archived=0 WHERE id=?', params.id).changes) throw notFound();
+    return { ok: true };
+  });
   route('GET', '/api/customers/:id', ({ params }) => {
     const c = one('SELECT * FROM customers WHERE id=?', params.id);
     if (!c) throw notFound();
@@ -116,7 +136,7 @@ function createApp(db, { geocode = nominatim } = {}) {
 
   // ---- pools ----
   route('GET', '/api/pools', () =>
-    all(`SELECT p.*, c.name AS customer_name, c.address FROM pools p JOIN customers c ON c.id=p.customer_id ORDER BY c.name COLLATE NOCASE, p.id`));
+    all(`SELECT p.*, c.name AS customer_name, c.address FROM pools p JOIN customers c ON c.id=p.customer_id WHERE c.archived=0 ORDER BY c.name COLLATE NOCASE, p.id`));
   crud('/api/pools', 'pools', ['customer_id', 'name', 'type', 'volume_gal', 'surface', 'sanitizer', 'notes'], { required: ['customer_id'] });
 
   // ---- stops (recurring route) ----
@@ -147,17 +167,20 @@ function createApp(db, { geocode = nominatim } = {}) {
   const VJSON = ['tasks', 'chemicals'];
   const flag = (v) => Dosing.issues(v.volume_gal, v);
 
-  route('GET', '/api/day/:date', ({ params, query }) => {
+  const ownStop = (user, v) => { if (user.role === 'tech' && v.tech_id !== user.tech_id) throw new HttpError(403, 'That stop is not assigned to you'); };
+  route('GET', '/api/day/:date', ({ params, query, user }) => {
     if (!isDate(params.date)) throw bad('date must be YYYY-MM-DD');
     ensureVisits(db, params.date);
+    if (user.role === 'tech') query = { ...query, tech_id: user.tech_id || -1 };   // technicians only ever see their own route
     const rows = query.tech_id
       ? all(`${VISIT_SELECT} WHERE v.date=? AND v.tech_id=? ORDER BY v.position, v.id`, params.date, query.tech_id)
       : all(`${VISIT_SELECT} WHERE v.date=? ORDER BY t.name, v.position, v.id`, params.date);
     return rows.map((v) => parseJson(v, VJSON));
   });
-  route('GET', '/api/visits/:id', ({ params }) => {
+  route('GET', '/api/visits/:id', ({ params, user }) => {
     const v = one(`${VISIT_SELECT} WHERE v.id=?`, params.id);
     if (!v) throw notFound();
+    ownStop(user, v);
     parseJson(v, VJSON);
     v.previous = parseJson(one(
       `SELECT date, fc, ph, ta, cya, ch, salt, temp FROM visits WHERE pool_id=? AND status='done' AND id!=? AND date<=? ORDER BY date DESC, id DESC LIMIT 1`,
@@ -171,9 +194,10 @@ function createApp(db, { geocode = nominatim } = {}) {
     const id = insertRow('visits', VISIT, VJSON, { position: 999, price: pool.rate, ...body });
     return parseJson(one(`${VISIT_SELECT} WHERE v.id=?`, id), VJSON);
   });
-  route('PUT', '/api/visits/:id', ({ params, body }) => {
+  route('PUT', '/api/visits/:id', ({ params, body, user }) => {
     const cur = one('SELECT * FROM visits WHERE id=?', params.id);
     if (!cur) throw notFound();
+    if (user.role === 'tech') { ownStop(user, cur); for (const k of ['pool_id', 'tech_id', 'date', 'position', 'price', 'cost', 'completed_at']) delete body[k]; }
     if (cur.invoice_id && ((body.price !== undefined && body.price !== cur.price) || (body.status !== undefined && body.status !== cur.status))) throw bad('Visit is already invoiced');
     if (body.status && !['scheduled', 'done', 'skipped'].includes(body.status)) throw bad('bad status');
     const now = new Date().toISOString();
@@ -327,7 +351,7 @@ function createApp(db, { geocode = nominatim } = {}) {
     const unassigned = all(
       `SELECT p.id AS pool_id, p.name AS pool_name, p.volume_gal, c.id AS customer_id, c.name AS customer_name, c.address, c.city, c.lat, c.lng, c.rate
        FROM pools p JOIN customers c ON c.id=p.customer_id
-       WHERE NOT EXISTS (SELECT 1 FROM stops s WHERE s.pool_id=p.id AND s.active=1) ORDER BY c.name COLLATE NOCASE`);
+       WHERE c.archived=0 AND NOT EXISTS (SELECT 1 FROM stops s WHERE s.pool_id=p.id AND s.active=1) ORDER BY c.name COLLATE NOCASE`);
     return { stops, unassigned, settings: getSettings() };
   });
 
@@ -408,49 +432,78 @@ function createApp(db, { geocode = nominatim } = {}) {
   });
   route('POST', '/api/dose', ({ body }) => Dosing.analyze(body.volume, body.readings || {}));
 
+  // ---- feature modules (each registers its own routes) ----
+  const ctx = { db, route, one, all, run, bad, notFound, HttpError, opts, parseJson, insertRow, updateRow, isDate, addDays, utcToday, ensureVisits, getSettings, round2: (n) => Math.round(n * 100) / 100 };
+  Auth.register(ctx);
+  Ops.register(ctx);
+  for (const m of opts.modules || require('./lib/modules')) m.register(ctx);
+
   // ---- http plumbing ----
+  const PUBLIC_API = [/^\/api\/auth\/(me|setup|login|logout)$/, /^\/api\/public\//, /^\/api\/stripe\/webhook$/];
+  const MAX_BODY = (p) => (/\/photos$/.test(p) ? 12e6 : 1e6);
   async function handleApi(req, res, url) {
-    let body = {};
+    const reply = { headers: {} }, pathname = url.pathname, mutating = !['GET', 'HEAD'].includes(req.method);
+    let body = {}, rawBody = '';
     if (req.method === 'POST' || req.method === 'PUT') {
       const chunks = []; let size = 0;
-      for await (const c of req) { size += c.length; if (size > 1e6) throw new HttpError(413, 'Body too large'); chunks.push(c); }
-      if (chunks.length) { try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { throw bad('Invalid JSON'); } }
+      for await (const c of req) { size += c.length; if (size > MAX_BODY(pathname)) throw new HttpError(413, 'Body too large'); chunks.push(c); }
+      rawBody = Buffer.concat(chunks).toString();
+      if (rawBody) { try { body = JSON.parse(rawBody); } catch { throw bad('Invalid JSON'); } }
       if (body === null || typeof body !== 'object' || Array.isArray(body)) throw bad('Body must be a JSON object');
+    }
+    // CSRF defence in depth (cookies are SameSite=Lax): refuse cross-origin state changes
+    const origin = req.headers.origin;
+    if (mutating && origin && !/^\/api\/stripe\/webhook$/.test(pathname)) {
+      let same = false; try { same = new URL(origin).host === req.headers.host; } catch { /* bad origin */ }
+      if (!same) throw new HttpError(403, 'Cross-origin request blocked');
+    }
+    const isPublic = PUBLIC_API.some((re) => re.test(pathname));
+    const user = Auth.authenticate(db, req);
+    if (!isPublic) {
+      if (!user) throw new HttpError(401, 'Please sign in');
+      if (!Auth.can(user, req.method, pathname)) throw new HttpError(403, 'You do not have access to that');
     }
     const query = Object.fromEntries(url.searchParams);
     let pathMatched = false;
     for (const r of routes) {
-      const m = r.re.exec(url.pathname);
+      const m = r.re.exec(pathname);
       if (!m) continue;
       pathMatched = true;
       if (r.method !== req.method) continue;
-      const out = await r.fn({ params: { ...m.groups }, query, body });
-      return send(res, 200, out);
+      const out = await r.fn({ params: { ...m.groups }, query, body, user, req, reply, rawBody });
+      if (mutating && user && !isPublic) ctx.audit(user, req.method, pathname, body);
+      return send(res, 200, out, reply);
     }
     throw pathMatched ? new HttpError(405, 'Method not allowed') : notFound();
   }
-  const send = (res, status, data) => {
-    const s = JSON.stringify(data);
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    res.end(s);
+  const SECURITY = {
+    'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob: https://*.tile.openstreetmap.org; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; script-src 'self' https://cdnjs.cloudflare.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+  };
+  const send = (res, status, data, reply = { headers: {} }) => {
+    if (data && data.__raw) { res.writeHead(data.__raw.status, { ...SECURITY, 'Cache-Control': 'no-store', ...data.__raw.headers, ...reply.headers }); return res.end(data.__raw.body); }
+    res.writeHead(status, { ...SECURITY, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...reply.headers });
+    res.end(JSON.stringify(data));
   };
 
   const PUB = path.join(__dirname, 'public');
-  const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon' };
+  const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.ico': 'image/x-icon' };
   function serveStatic(req, res, url) {
     let rel = decodeURIComponent(url.pathname);
     if (rel === '/') rel = '/index.html';
+    if (/^\/(portal|quote|pay)(\/|$)/.test(rel)) rel = '/public.html';   // customer-facing pages (no login)
     const file = path.normalize(path.join(PUB, rel));
     if (!file.startsWith(PUB + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
       res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('Not found');
     }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    res.writeHead(200, { ...SECURITY, 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     fs.createReadStream(file).pipe(res);
   }
 
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
+      if (url.pathname === '/healthz') { db.prepare('SELECT 1').get(); res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
       if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
       serveStatic(req, res, url);
@@ -461,7 +514,7 @@ function createApp(db, { geocode = nominatim } = {}) {
         if (/constraint/i.test(msg)) e = bad(msg.replace(/^.*constraint failed: /i, 'Invalid data: '));
         else { console.error(e); e = new HttpError(500, 'Server error'); }
       }
-      if (!res.headersSent) send(res, e.status, { error: e.message }); else res.end();
+      if (!res.headersSent) send(res, e.status, { error: e.message }, { headers: e.headers || {} }); else res.end();
     }
   });
 }
@@ -469,11 +522,13 @@ function createApp(db, { geocode = nominatim } = {}) {
 module.exports = { createApp };
 
 if (require.main === module) {
-  const db = open();
+  const dbFile = process.env.DB_PATH || path.join(__dirname, 'data', 'splashdesk.db');
+  const db = open(dbFile);
   if (process.env.SEED_DEMO && !db.prepare('SELECT 1 FROM techs LIMIT 1').get()) {
     require('./seed').seed(db);
-    console.log('Seeded demo data.');
+    console.log('Seeded demo data. Demo logins: owner@demo.test / tech@demo.test  (password: demo1234)');
   }
+  if (!process.env.NO_BACKUPS) require('./lib/ops').scheduleBackups(db, process.env.BACKUP_DIR || path.join(path.dirname(dbFile), 'backups'));
   const port = Number(process.env.PORT) || 3000;
   const host = process.env.HOST || '127.0.0.1';
   createApp(db).listen(port, host, () => console.log(`SplashDesk running at http://${host}:${port}`));

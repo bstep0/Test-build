@@ -1,0 +1,11 @@
+# Render.com blueprint: one web service with a persistent disk for the SQLite database.
+services:
+  - type: web
+    name: splashdesk
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    disk: { name: data, mountPath: /data, sizeGB: 1 }
+    envVars:
+      - { key: COOKIE_SECURE, value: "1" }
+      - { key: PUBLIC_URL, sync: false }

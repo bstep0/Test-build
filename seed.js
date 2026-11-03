@@ -53,6 +53,13 @@ function seed(db, today = new Date()) {
       p, techs[Math.floor(rand() * 3)], 1 + Math.floor(rand() * 5), i === 13 ? 2 : 1, 10 + i, startDate); // deliberately unoptimised
   });
 
+  // demo logins (only created by the demo seed)
+  const { hashPassword } = require('./lib/auth');
+  const addUser = db.prepare('INSERT INTO users (email, name, role, password_hash, tech_id) VALUES (?,?,?,?,?)');
+  addUser.run('owner@demo.test', 'Demo Owner', 'owner', hashPassword('demo1234'), null);
+  addUser.run('office@demo.test', 'Demo Office', 'office', hashPassword('demo1234'), null);
+  addUser.run('tech@demo.test', 'Maria Lopez', 'tech', hashPassword('demo1234'), techs[0]);
+
   // history: complete all past visits with plausible readings
   const done = db.prepare(`UPDATE visits SET status='done', arrived_at=?, completed_at=?, fc=?, ph=?, ta=?, cya=?, ch=?, salt=?, temp=?, tasks=?, notes=? WHERE id=?`);
   const todayStr = iso(today);
